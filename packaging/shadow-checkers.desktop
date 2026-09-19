@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Shadow Checkers
+GenericName=Checkers
+Comment=Premium 3D English/American checkers for Linux
+Exec=/home/rtx5060ti/.local/bin/shadow-checkers
+TryExec=/home/rtx5060ti/.local/bin/shadow-checkers
+Icon=shadow-checkers
+Terminal=false
+Categories=Game;BoardGame;
+Keywords=checkers;draughts;board;3d;shadow;
+StartupNotify=true
+StartupWMClass=Shadow Checkers
