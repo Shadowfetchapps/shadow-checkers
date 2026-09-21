@@ -28,6 +28,11 @@ func run_all() -> bool:
 	_test_fen_roundtrip()
 	_test_black_moves_first()
 	_test_perft_start()
+	_test_draw_40_move()
+	_test_draw_repetition()
+	_test_unique_destination()
+	_test_ai_returns_quickly()
+	_test_ai_job_and_playthrough()
 	print("\n==============================")
 	print("Shadow Checkers  —  %d passed, %d failed" % [_passed, _failed])
 	for e in _errors:
@@ -365,3 +370,93 @@ func _test_perft_start() -> void:
 	# Depth 3 is 7*7*7 if no captures open; captures appear after some 2-move sequences.
 	var p3 := e.perft(3)
 	_ok("perft 3 > 200", p3 > 200, str(p3))
+
+
+func _test_draw_40_move() -> void:
+	print("forty-move draw")
+	var e := _empty(CheckersTypes.WHITE)
+	_place(e, "a1", CheckersTypes.KING, CheckersTypes.WHITE)
+	_place(e, "h8", CheckersTypes.KING, CheckersTypes.BLACK)
+	e._rebuild_pos_keys()
+	e.halfmove = 79
+	e.play(CheckersTypes.parse_square("a1"), CheckersTypes.parse_square("b2"))
+	_ok("40-move draw after 80 quiets", e.result == CheckersEngine.Result.DRAW_40_MOVE, str(e.result))
+	_ok("draw is game over", e.game_over())
+	_ok("no winner", e.result_side == -1)
+
+
+func _test_draw_repetition() -> void:
+	print("repetition draw")
+	var e := _empty(CheckersTypes.WHITE)
+	_place(e, "c3", CheckersTypes.KING, CheckersTypes.WHITE)
+	_place(e, "g7", CheckersTypes.KING, CheckersTypes.BLACK)
+	e._rebuild_pos_keys()
+	# Oscillate the white king, then black, three times to the same full position.
+	var cycle := [
+		["c3", "d4"], ["g7", "f6"],
+		["d4", "c3"], ["f6", "g7"],
+		["c3", "d4"], ["g7", "f6"],
+		["d4", "c3"], ["f6", "g7"],
+	]
+	for hop in cycle:
+		var m := e.play(CheckersTypes.parse_square(hop[0]), CheckersTypes.parse_square(hop[1]))
+		_ok("cycle hop %s-%s" % [hop[0], hop[1]], m != null)
+		if e.game_over():
+			break
+	_ok("threefold draw", e.result == CheckersEngine.Result.DRAW_REPETITION, e.result_text())
+
+
+func _test_unique_destination() -> void:
+	print("unique destination")
+	var e := _e()
+	var dest := CheckersTypes.parse_square("a5")
+	var m := e.unique_move_to(dest)
+	_ok("start a5 unique from b6", m != null and m.from_sq == CheckersTypes.parse_square("b6"))
+	var squares := e.movable_squares()
+	_ok("four black men can move at start", squares.size() == 4, str(squares.size()))
+
+
+func _test_ai_returns_quickly() -> void:
+	print("ai time budget")
+	var e := _e()
+	for diff in ["easy", "medium", "hard", "master"]:
+		var t0 := Time.get_ticks_msec()
+		var move := CheckersAI.choose(e, diff)
+		var dt := Time.get_ticks_msec() - t0
+		_ok("%s returns a move" % diff, move != null, str(dt))
+		_ok("%s under 2.2s" % diff, dt < 2200, str(dt))
+		_ok("%s move is legal" % diff, e.find_uci(move.to_uci()) != null)
+
+
+func _test_ai_job_and_playthrough() -> void:
+	print("ai job and playthrough")
+	var job := CheckersAI.SearchJob.new()
+	job.fen = CheckersTypes.START_FEN
+	job.difficulty = "easy"
+	job.run()
+	_ok("job produced uci", job.move_uci.length() >= 4, job.move_uci)
+	var e := _e()
+	var first := e.find_uci(job.move_uci)
+	_ok("job move legal on start", first != null)
+	e.apply_move(first)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 42
+	var ply := 0
+	while not e.game_over() and ply < 80:
+		var moves := e.generate_legal_moves()
+		if moves.is_empty():
+			break
+		var pick: CheckersMove
+		if ply % 2 == 0:
+			pick = CheckersAI.choose(e, "easy")
+			if pick == null:
+				pick = moves[0]
+		else:
+			pick = moves[rng.randi_range(0, moves.size() - 1)]
+		if e.apply_move(pick) == null:
+			break
+		ply += 1
+	_ok("playthrough made moves", ply > 4, str(ply))
+	if e.game_over():
+		_ok("ended with a real result", e.result != CheckersEngine.Result.NONE)
+		_ok("result text not empty", not e.result_text().is_empty())

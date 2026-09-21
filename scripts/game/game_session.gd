@@ -11,6 +11,16 @@ var black_name: String = "Black"
 var clock_seconds: int = 600
 
 
+func _ready() -> void:
+	for arg in OS.get_cmdline_user_args():
+		if arg == "--verify-ai":
+			configure_ai(true)
+			return
+		if arg.begins_with("--verify-ai="):
+			configure_ai(arg != "--verify-ai=black")
+			return
+
+
 func reset_defaults() -> void:
 	mode = Mode.LOCAL
 	ai_side = CheckersTypes.WHITE

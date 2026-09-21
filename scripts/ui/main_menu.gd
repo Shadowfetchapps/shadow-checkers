@@ -89,7 +89,7 @@ func _build_ui() -> void:
 	box.add_theme_constant_override("separation", 14)
 	add_child(box)
 	var kicker := Label.new()
-	kicker.text = "PREMIUM DESKTOP CHECKERS"
+	kicker.text = "ENGLISH / AMERICAN DRAUGHTS"
 	kicker.add_theme_color_override("font_color", ThemeFactory.accent())
 	kicker.add_theme_font_size_override("font_size", 12)
 	box.add_child(kicker)
@@ -101,12 +101,12 @@ func _build_ui() -> void:
 	title.add_theme_font_size_override("font_size", 48)
 	box.add_child(title)
 	var sub := Label.new()
-	sub.text = "English / American"
+	sub.text = "A quiet table. A sharp game."
 	sub.add_theme_font_size_override("font_size", 22)
-	sub.add_theme_color_override("font_color", Color(0.75, 0.82, 0.88))
+	sub.add_theme_color_override("font_color", Color(0.78, 0.84, 0.90))
 	box.add_child(sub)
 	var blurb := Label.new()
-	blurb.text = "Dark squares. Forced jumps. Cinematic light."
+	blurb.text = "Forced jumps, kings, and a Shadow that thinks off the board."
 	blurb.add_theme_color_override("font_color", ThemeFactory.muted())
 	box.add_child(blurb)
 	box.add_child(Control.new())

@@ -8,7 +8,12 @@ enum Result {
 	RESIGNATION,
 	TIMEOUT,
 	DRAW_AGREED,
+	DRAW_40_MOVE,
+	DRAW_REPETITION,
 }
+
+const DRAW_HALFMOVES := 80
+const REPETITION_DRAW := 3
 
 var squares: PackedInt32Array = PackedInt32Array()
 var side_to_move: int = CheckersTypes.BLACK
@@ -18,6 +23,7 @@ var fullmove: int = 1
 var next_turn_id: int = 1
 var history: Array[CheckersMove] = []
 var redo_stack: Array[CheckersMove] = []
+var pos_keys: PackedInt64Array = PackedInt64Array()
 var result: Result = Result.NONE
 var result_side: int = -1
 var resigned_side: int = -1
@@ -43,6 +49,7 @@ func clear() -> void:
 	next_turn_id = 1
 	history.clear()
 	redo_stack.clear()
+	pos_keys.clear()
 	result = Result.NONE
 	result_side = -1
 	resigned_side = -1
@@ -67,6 +74,7 @@ func clone() -> CheckersEngine:
 	e.redo_stack.clear()
 	for m in redo_stack:
 		e.redo_stack.append(m.duplicate_move())
+	e.pos_keys = pos_keys.duplicate()
 	return e
 
 
@@ -120,6 +128,49 @@ func find_move(from_sq: int, to_sq: int) -> CheckersMove:
 		if m.matches(from_sq, to_sq):
 			return m
 	return null
+
+
+func find_uci(uci: String) -> CheckersMove:
+	if uci.length() < 4:
+		return null
+	return find_move(CheckersTypes.parse_square(uci.substr(0, 2)), CheckersTypes.parse_square(uci.substr(2, 2)))
+
+
+func unique_move_to(to_sq: int) -> CheckersMove:
+	var found: CheckersMove = null
+	for m in generate_legal_moves():
+		if m.to_sq != to_sq:
+			continue
+		if found != null:
+			return null
+		found = m
+	return found
+
+
+func movable_squares() -> PackedInt32Array:
+	var seen: Dictionary = {}
+	var out := PackedInt32Array()
+	for m in generate_legal_moves():
+		if seen.has(m.from_sq):
+			continue
+		seen[m.from_sq] = true
+		out.append(m.from_sq)
+	return out
+
+
+func repetition_count() -> int:
+	if pos_keys.is_empty():
+		return 0
+	var key := pos_keys[pos_keys.size() - 1]
+	var n := 0
+	for k in pos_keys:
+		if k == key:
+			n += 1
+	return n
+
+
+func is_drawish() -> bool:
+	return halfmove >= DRAW_HALFMOVES or repetition_count() >= REPETITION_DRAW
 
 
 func is_legal(from_sq: int, to_sq: int) -> bool:
@@ -238,6 +289,10 @@ func result_text() -> String:
 			return "%s flagged — %s wins" % [CheckersTypes.side_name(timed_out_side), CheckersTypes.side_name(result_side)]
 		Result.DRAW_AGREED:
 			return "Draw by agreement"
+		Result.DRAW_40_MOVE:
+			return "Draw — 40 moves without a capture"
+		Result.DRAW_REPETITION:
+			return "Draw — position repeated three times"
 		_:
 			if must_continue_sq >= 0:
 				return "%s must continue jumping" % CheckersTypes.side_name(side_to_move)
@@ -251,6 +306,7 @@ func to_fen() -> String:
 func from_fen(fen: String) -> bool:
 	if not CheckersFen.parse(self, fen):
 		return false
+	_rebuild_pos_keys()
 	_refresh_result()
 	return true
 
@@ -341,6 +397,14 @@ func _refresh_result() -> void:
 	if generate_legal_moves().is_empty():
 		result = Result.NO_MOVES
 		result_side = CheckersTypes.opp(side_to_move)
+		return
+	if halfmove >= DRAW_HALFMOVES:
+		result = Result.DRAW_40_MOVE
+		result_side = -1
+		return
+	if repetition_count() >= REPETITION_DRAW:
+		result = Result.DRAW_REPETITION
+		result_side = -1
 		return
 	result = Result.NONE
 	result_side = -1
@@ -475,6 +539,7 @@ func _make(m: CheckersMove) -> void:
 		halfmove = 0
 	else:
 		halfmove += 1
+	pos_keys.append(_pos_key())
 
 
 func _unmake(m: CheckersMove) -> void:
@@ -488,3 +553,22 @@ func _unmake(m: CheckersMove) -> void:
 	squares[m.to_sq] = 0
 	if m.captured_sq >= 0:
 		squares[m.captured_sq] = m.captured
+	if pos_keys.size() > 0:
+		pos_keys.resize(pos_keys.size() - 1)
+
+
+func _rebuild_pos_keys() -> void:
+	pos_keys.clear()
+	pos_keys.append(_pos_key())
+
+
+func _pos_key() -> int:
+	var h := 2166136261
+	for i in 64:
+		var p := squares[i]
+		if p == 0:
+			continue
+		h = (h ^ ((p << 6) + i * 17)) * 16777619
+	h ^= side_to_move * 2654435761
+	h ^= (must_continue_sq + 3) * 2246822519
+	return h

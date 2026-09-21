@@ -22,6 +22,9 @@ signal settings_changed
 
 func _ready() -> void:
 	load_settings()
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--ai-difficulty="):
+			ai_difficulty = arg.trim_prefix("--ai-difficulty=")
 	if not _is_headless():
 		apply_display()
 		apply_audio()

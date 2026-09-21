@@ -1,6 +1,6 @@
 # Shadow Checkers
 
-A premium desktop 3D English/American checkers game for Linux, built with Godot 4.7 and a presentation-independent rules engine.
+A premium desktop 3D English/American checkers game for Linux, built with Godot 4.7 and a presentation-independent rules engine. Shadow's search runs on a worker thread so the board never freezes.
 
 Sibling to [Shadow Chess 3D](../ShadowChess3D) — same visual family, not a fork.
 
@@ -57,10 +57,11 @@ English/American draughts:
 - Jumps are mandatory; multi-jumps continue with the same piece
 - Promoting a man to king ends the turn
 - Win by capturing all opposing pieces or leaving the opponent with no legal moves
+- Draw after 40 moves without a capture, or if the same position occurs three times
 
 ## Controls
 
-- **LMB** — select and move
+- **LMB** — select a piece, then click a destination (or click the destination if only one piece can go there)
 - **RMB** — orbit
 - **Wheel** — zoom
 - **MMB** — pan

@@ -11,6 +11,8 @@ var _pause: PanelContainer
 var _end: PanelContainer
 var _fen_box: LineEdit
 var _thinking: Label
+var _turn_chip: Label
+var _diff: Label
 
 
 func _ready() -> void:
@@ -20,6 +22,19 @@ func _ready() -> void:
 	controller.state_changed.connect(_refresh)
 	controller.game_ended.connect(_show_end)
 	_refresh()
+
+
+func _process(_delta: float) -> void:
+	if controller == null:
+		return
+	if controller.is_ai_thinking():
+		_thinking.visible = true
+		_thinking.modulate.a = 0.55 + 0.45 * sin(Time.get_ticks_msec() * 0.006)
+		_status.text = controller.turn_status()
+		_paint_turn_chip()
+	elif _thinking.visible:
+		_thinking.visible = false
+		_thinking.modulate.a = 1.0
 
 
 func _build() -> void:
@@ -35,8 +50,12 @@ func _build() -> void:
 	_thinking.text = "Shadow is thinking…"
 	_thinking.visible = false
 	_thinking.add_theme_color_override("font_color", ThemeFactory.accent())
+	_thinking.add_theme_font_size_override("font_size", 18)
 	_thinking.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_thinking.offset_top = 72
+	_thinking.offset_left = -180
+	_thinking.offset_right = 180
+	_thinking.offset_top = 78
+	_thinking.offset_bottom = 108
 	_thinking.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	root.add_child(_thinking)
 	_pause = _make_pause()
@@ -51,7 +70,7 @@ func _top_bar() -> PanelContainer:
 	bar.offset_left = 16
 	bar.offset_right = -16
 	bar.offset_top = 12
-	bar.offset_bottom = 64
+	bar.offset_bottom = 70
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 10)
 	bar.add_child(row)
@@ -63,10 +82,16 @@ func _top_bar() -> PanelContainer:
 	title.add_theme_font_size_override("font_size", 20)
 	title.add_theme_color_override("font_color", ThemeFactory.accent())
 	row.add_child(title)
+	_turn_chip = Label.new()
+	_turn_chip.text = "Black to move"
+	_turn_chip.add_theme_font_size_override("font_size", 14)
+	_turn_chip.add_theme_color_override("font_color", ThemeFactory.gold())
+	row.add_child(_turn_chip)
 	_status = Label.new()
 	_status.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	row.add_child(_status)
+	row.add_child(_btn("New Game", _new_game))
 	row.add_child(_btn("Undo", controller.undo))
 	row.add_child(_btn("Redo", controller.redo))
 	row.add_child(_btn("Flip", controller.flip_board))
@@ -77,17 +102,21 @@ func _top_bar() -> PanelContainer:
 func _side_panel() -> PanelContainer:
 	var panel := PanelContainer.new()
 	panel.set_anchors_preset(Control.PRESET_RIGHT_WIDE)
-	panel.offset_left = -320
+	panel.offset_left = -328
 	panel.offset_right = -16
-	panel.offset_top = 80
+	panel.offset_top = 84
 	panel.offset_bottom = -90
 	var v := VBoxContainer.new()
 	v.add_theme_constant_override("separation", 10)
 	panel.add_child(v)
+	v.add_child(_heading("Players"))
+	_diff = Label.new()
+	_diff.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	v.add_child(_diff)
 	v.add_child(_heading("Clocks"))
 	var clocks := HBoxContainer.new()
-	_clock_w = _clock_label("W  ∞")
-	_clock_b = _clock_label("B  ∞")
+	_clock_w = _clock_label("White  ∞")
+	_clock_b = _clock_label("Black  ∞")
 	clocks.add_child(_clock_w)
 	clocks.add_child(_clock_b)
 	v.add_child(clocks)
@@ -120,20 +149,20 @@ func _bottom_bar() -> PanelContainer:
 	var bar := PanelContainer.new()
 	bar.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
 	bar.offset_left = 16
-	bar.offset_right = -336
+	bar.offset_right = -344
 	bar.offset_top = -78
 	bar.offset_bottom = -16
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 10)
 	bar.add_child(row)
 	row.add_child(_btn("Save", func(): _toast_save(controller.save_now())))
-	row.add_child(_btn("Restart", controller.restart))
 	row.add_child(_btn("Resign", controller.resign))
 	row.add_child(_btn("Menu", _to_menu))
 	var hint := Label.new()
-	hint.text = "LMB select/move   RMB orbit   Wheel zoom   MMB pan   H reset   F flip   Z undo"
+	hint.text = "Click a piece, then a square   ·   click destination   ·   RMB orbit   ·   H reset   ·   F flip   ·   Z undo"
 	hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.add_theme_font_size_override("font_size", 12)
 	hint.add_theme_color_override("font_color", ThemeFactory.muted())
 	row.add_child(hint)
@@ -144,6 +173,7 @@ func _make_pause() -> PanelContainer:
 	var p := _modal("Paused")
 	var v: VBoxContainer = p.get_node("V")
 	v.add_child(_btn("Resume", _toggle_pause))
+	v.add_child(_btn("New Game", func(): _toggle_pause(); _new_game()))
 	v.add_child(_btn("Settings", _open_settings))
 	v.add_child(_btn("Resign", func(): _toggle_pause(); controller.resign()))
 	v.add_child(_btn("Main menu", _to_menu))
@@ -159,7 +189,7 @@ func _make_end() -> PanelContainer:
 	msg.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	msg.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	v.add_child(msg)
-	v.add_child(_btn("New game", func(): p.visible = false; controller.restart()))
+	v.add_child(_btn("New game", func(): p.visible = false; _new_game()))
 	v.add_child(_btn("Save", func(): controller.save_now()))
 	v.add_child(_btn("Main menu", _to_menu))
 	p.visible = false
@@ -169,11 +199,11 @@ func _make_end() -> PanelContainer:
 func _modal(title: String) -> PanelContainer:
 	var p := PanelContainer.new()
 	p.set_anchors_preset(Control.PRESET_CENTER)
-	p.custom_minimum_size = Vector2(360, 80)
-	p.offset_left = -200
-	p.offset_right = 200
-	p.offset_top = -140
-	p.offset_bottom = 140
+	p.custom_minimum_size = Vector2(380, 80)
+	p.offset_left = -210
+	p.offset_right = 210
+	p.offset_top = -150
+	p.offset_bottom = 150
 	var v := VBoxContainer.new()
 	v.name = "V"
 	v.add_theme_constant_override("separation", 12)
@@ -220,18 +250,54 @@ func _refresh() -> void:
 	if controller == null:
 		return
 	var e := controller.engine
-	_status.text = e.result_text()
-	_clock_w.text = "White  %s" % _fmt(controller.white_clock)
-	_clock_b.text = "Black  %s" % _fmt(controller.black_clock)
-	if not controller.clock_enabled:
-		_clock_w.text = "White  ∞"
-		_clock_b.text = "Black  ∞"
+	_status.text = controller.turn_status()
+	_paint_turn_chip()
+	_paint_clocks()
 	_history.text = _history_bb(e)
 	_cap_w.text = "White took  " + _captured(e, CheckersTypes.BLACK)
 	_cap_b.text = "Black took  " + _captured(e, CheckersTypes.WHITE)
 	_fen_box.text = e.to_fen()
-	_thinking.visible = controller._ai_busy
+	_thinking.visible = controller.is_ai_thinking()
+	_diff.text = _player_line()
 	controller.paused = _pause.visible
+	if not e.game_over():
+		_end.visible = false
+
+
+func _player_line() -> String:
+	if GameSession.mode == GameSession.Mode.AI:
+		var you := "Black" if GameSession.ai_side == CheckersTypes.WHITE else "White"
+		return "You are %s   ·   Shadow  %s" % [you, SettingsStore.ai_difficulty.capitalize()]
+	return "%s vs %s" % [GameSession.white_name, GameSession.black_name]
+
+
+func _paint_turn_chip() -> void:
+	if controller.engine.game_over():
+		_turn_chip.text = "Finished"
+		_turn_chip.add_theme_color_override("font_color", ThemeFactory.gold())
+		return
+	if controller.is_ai_thinking():
+		_turn_chip.text = "Thinking"
+		_turn_chip.add_theme_color_override("font_color", ThemeFactory.accent())
+		return
+	var side := controller.engine.side_to_move
+	_turn_chip.text = "%s to move" % CheckersTypes.side_name(side)
+	if side == CheckersTypes.BLACK:
+		_turn_chip.add_theme_color_override("font_color", Color(0.78, 0.86, 0.94))
+	else:
+		_turn_chip.add_theme_color_override("font_color", Color(0.96, 0.88, 0.70))
+
+
+func _paint_clocks() -> void:
+	if not controller.clock_enabled:
+		_clock_w.text = "White  ∞"
+		_clock_b.text = "Black  ∞"
+	else:
+		_clock_w.text = "White  %s" % _fmt(controller.white_clock)
+		_clock_b.text = "Black  %s" % _fmt(controller.black_clock)
+	var side := controller.engine.side_to_move
+	_clock_w.add_theme_color_override("font_color", ThemeFactory.gold() if side == CheckersTypes.WHITE and not controller.engine.game_over() else Color(0.84, 0.90, 0.94))
+	_clock_b.add_theme_color_override("font_color", ThemeFactory.gold() if side == CheckersTypes.BLACK and not controller.engine.game_over() else Color(0.84, 0.90, 0.94))
 
 
 func _history_bb(e: CheckersEngine) -> String:
@@ -280,7 +346,8 @@ func _fmt(t: float) -> String:
 func _toggle_pause() -> void:
 	_pause.visible = not _pause.visible
 	controller.paused = _pause.visible
-	_end.visible = false
+	if _pause.visible:
+		_end.visible = false
 
 
 func _show_end(text: String) -> void:
@@ -288,15 +355,26 @@ func _show_end(text: String) -> void:
 	var msg := _end.get_node("V/Msg") as Label
 	if msg:
 		msg.text = text
+	_status.text = text
+	_paint_turn_chip()
+
+
+func _new_game() -> void:
+	_end.visible = false
+	_pause.visible = false
+	controller.paused = false
+	controller.restart()
 
 
 func _load_fen() -> void:
+	controller._cancel_ai()
 	if controller.engine.from_fen(_fen_box.text.strip_edges()):
 		controller.last_from = -1
 		controller.last_to = -1
 		controller.rebuild_pieces()
 		controller._deselect()
 		controller.state_changed.emit()
+		controller._maybe_ai()
 
 
 func _toast_save(path: String) -> void:
@@ -308,6 +386,7 @@ func _open_settings() -> void:
 
 
 func _to_menu() -> void:
+	controller._cancel_ai()
 	get_tree().change_scene_to_file("res://scenes/menus/main_menu.tscn")
 
 
