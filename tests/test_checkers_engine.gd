@@ -1,15 +1,11 @@
-class_name TestCheckersEngine
-extends RefCounted
+extends "res://tests/test_base.gd"
 
-var _passed := 0
-var _failed := 0
-var _errors: PackedStringArray = PackedStringArray()
+## English/American rules and the general engine API (ported from the v1 suite
+## to full-turn moves, plus new coverage).
 
 
 func run_all() -> bool:
-	_passed = 0
-	_failed = 0
-	_errors.clear()
+	suite_name = "english"
 	_test_start_position()
 	_test_dark_squares_only()
 	_test_man_movement()
@@ -17,446 +13,484 @@ func run_all() -> bool:
 	_test_captures()
 	_test_forced_capture()
 	_test_multi_jump()
+	_test_branching_prefix()
 	_test_promotion()
 	_test_promotion_ends_jump()
 	_test_king_moves()
 	_test_king_captures()
+	_test_king_loop()
 	_test_win_no_pieces()
 	_test_win_no_moves()
 	_test_illegal_rejected()
 	_test_undo_redo()
-	_test_fen_roundtrip()
+	_test_undo_redo_multi()
 	_test_black_moves_first()
 	_test_perft_start()
-	_test_draw_40_move()
+	_test_draw_move_rule()
 	_test_draw_repetition()
-	_test_unique_destination()
-	_test_ai_returns_quickly()
-	_test_ai_job_and_playthrough()
-	print("\n==============================")
-	print("Shadow Checkers  —  %d passed, %d failed" % [_passed, _failed])
-	for e in _errors:
-		print("  FAIL  ", e)
-	print("==============================\n")
-	return _failed == 0
-
-
-func _ok(name: String, cond: bool, detail: String = "") -> void:
-	if cond:
-		_passed += 1
-		print("  ok    ", name)
-	else:
-		_failed += 1
-		var msg := name if detail.is_empty() else "%s — %s" % [name, detail]
-		_errors.append(msg)
-		print("  FAIL  ", msg)
+	_test_movable_squares()
+	_test_results_and_tokens()
+	_test_clone_and_cache()
+	_test_hash_incremental()
+	_test_generation_speed()
+	return failed == 0
 
 
 func _e() -> CheckersEngine:
-	return CheckersEngine.new()
-
-
-func _has(engine: CheckersEngine, uci: String) -> bool:
-	for m in engine.generate_legal_moves():
-		if m.to_uci() == uci:
-			return true
-	return false
-
-
-func _count(engine: CheckersEngine) -> int:
-	return engine.generate_legal_moves().size()
-
-
-func _count_from(engine: CheckersEngine, from_alg: String) -> int:
-	return engine.generate_legal_from(CheckersTypes.parse_square(from_alg)).size()
-
-
-func _place(engine: CheckersEngine, alg: String, type: int, color: int) -> void:
-	engine.squares[CheckersTypes.parse_square(alg)] = CheckersTypes.pack(type, color)
-
-
-func _empty(side: int = CheckersTypes.BLACK) -> CheckersEngine:
-	var e := CheckersEngine.new()
-	e.clear()
-	e.side_to_move = side
-	e.result = CheckersEngine.Result.NONE
-	return e
+	return CheckersEngine.new("english")
 
 
 func _test_start_position() -> void:
-	print("start position")
+	section("start position")
 	var e := _e()
-	_ok("start fen prefix", e.to_fen().begins_with("1b1b1b1b/b1b1b1b1/1b1b1b1b/8/8/w1w1w1w1/1w1w1w1w/w1w1w1w1 b"))
-	_ok("12 white", e.piece_count(CheckersTypes.WHITE) == 12, str(e.piece_count(CheckersTypes.WHITE)))
-	_ok("12 black", e.piece_count(CheckersTypes.BLACK) == 12, str(e.piece_count(CheckersTypes.BLACK)))
-	_ok("7 legal at start", _count(e) == 7, str(_count(e)))
-	_ok("black to move", e.side_to_move == CheckersTypes.BLACK)
-	_ok("not over", not e.game_over())
+	eq("start fen", e.to_fen(), "B:W21,22,23,24,25,26,27,28,29,30,31,32:B1,2,3,4,5,6,7,8,9,10,11,12")
+	eq("start_fen stored", e.start_fen, CheckersRules.start_fen("english"))
+	eq("12 white", e.piece_count(CheckersTypes.WHITE), 12)
+	eq("12 black", e.piece_count(CheckersTypes.BLACK), 12)
+	eq("no kings", e.king_count(CheckersTypes.WHITE) + e.king_count(CheckersTypes.BLACK), 0)
+	eq("7 legal at start", count(e), 7)
+	eq("black to move", e.side_to_move, CheckersTypes.BLACK)
+	ok("not over", not e.game_over())
+	ok("no forced capture at start", not e.must_capture())
+	eq("variant", e.variant, "english")
+	eq("halfmove 0", e.halfmove, 0)
+	eq("fullmove 1", e.fullmove, 1)
 
 
 func _test_dark_squares_only() -> void:
-	print("dark squares")
+	section("dark squares")
 	var e := _e()
-	for sq in 64:
-		var p := e.piece_at(sq)
-		if p != 0:
-			_ok("piece on dark %s" % CheckersTypes.algebraic(sq), CheckersTypes.is_dark(sq))
-	_ok("a1 is dark", CheckersTypes.is_dark(CheckersTypes.parse_square("a1")))
-	_ok("b1 is light", not CheckersTypes.is_dark(CheckersTypes.parse_square("b1")))
-	_ok("b1 not occupied", e.piece_at(CheckersTypes.parse_square("b1")) == 0)
+	var all_dark := true
+	for s in 64:
+		if e.piece_at(s) != 0 and not CheckersTypes.is_dark(s):
+			all_dark = false
+	ok("every piece on a dark square", all_dark)
+	ok("a1 is dark", CheckersTypes.is_dark(sqa("a1")))
+	ok("b1 is light", not CheckersTypes.is_dark(sqa("b1")))
+	ok("b1 not occupied", e.piece_at(sqa("b1")) == 0)
+	ok("piece_at out of range is empty", e.piece_at(-1) == 0 and e.piece_at(64) == 0)
 
 
 func _test_man_movement() -> void:
-	print("man movement")
+	section("man movement")
 	var e := _e()
-	_ok("b6a5", _has(e, "b6a5"))
-	_ok("b6c5", _has(e, "b6c5"))
-	_ok("h6g5", _has(e, "h6g5"))
-	_ok("no backward black", not _has(e, "b6a7") and not _has(e, "b6c7"))
-	_ok("no sideways", not _has(e, "b6b5"))
-	_ok("no two-step quiet", not _has(e, "b6d4"))
-	e.play(CheckersTypes.parse_square("b6"), CheckersTypes.parse_square("c5"))
-	_ok("white to move after quiet", e.side_to_move == CheckersTypes.WHITE)
-	_ok("white man forward c3d4", _has(e, "c3d4"))
-	_ok("white man forward c3b4", _has(e, "c3b4"))
-	_ok("white no backward", not _has(e, "c3b2") and not _has(e, "c3d2"))
-	var lonely := _empty(CheckersTypes.WHITE)
-	_place(lonely, "c5", CheckersTypes.MAN, CheckersTypes.WHITE)
-	_ok("lonely white 2 quiets", _count_from(lonely, "c5") == 2, str(_count_from(lonely, "c5")))
-	_ok("c5d6", _has(lonely, "c5d6"))
-	_ok("c5b6", _has(lonely, "c5b6"))
-	_ok("c5 no back", not _has(lonely, "c5b4") and not _has(lonely, "c5d4"))
+	ok("b6a5", has(e, "b6a5"))
+	ok("b6c5", has(e, "b6c5"))
+	ok("h6g5", has(e, "h6g5"))
+	ok("no backward black", not has(e, "b6a7") and not has(e, "b6c7"))
+	ok("no sideways", not has(e, "b6b5"))
+	ok("no two-step quiet", not has(e, "b6d4"))
+	ok("play b6c5", play(e, "b6c5") != null)
+	eq("white to move after quiet", e.side_to_move, CheckersTypes.WHITE)
+	ok("white man forward c3d4", has(e, "c3d4"))
+	ok("white man forward c3b4", has(e, "c3b4"))
+	ok("white no backward", not has(e, "c3b2") and not has(e, "c3d2"))
+	var lonely := pos("english", "W:Wc5:Bh8")
+	eq("lonely white 2 quiets", count_from(lonely, "c5"), 2)
+	ok("c5d6", has(lonely, "c5d6"))
+	ok("c5b6", has(lonely, "c5b6"))
+	ok("c5 no back", not has(lonely, "c5b4") and not has(lonely, "c5d4"))
+	var m := lonely.find_uci("c5d6")
+	ok("quiet move shape", m != null and m.path.size() == 2 and not m.is_capture() and m.capture_count() == 0)
+	ok("quiet move fields", m != null and m.piece == CheckersTypes.MAN and m.color == CheckersTypes.WHITE and not m.promotes and m.promote_index == -1)
+	ok("from/to helpers", m != null and m.from_sq() == sqa("c5") and m.to_sq() == sqa("d6"))
 
 
 func _test_blocked_pieces() -> void:
-	print("blocked pieces")
-	var e := _empty(CheckersTypes.WHITE)
-	_place(e, "c3", CheckersTypes.MAN, CheckersTypes.WHITE)
-	_place(e, "b4", CheckersTypes.MAN, CheckersTypes.WHITE)
-	_place(e, "d4", CheckersTypes.MAN, CheckersTypes.WHITE)
-	_ok("blocked white man 0", _count_from(e, "c3") == 0, str(_count_from(e, "c3")))
-	var e2 := _empty(CheckersTypes.BLACK)
-	_place(e2, "d6", CheckersTypes.MAN, CheckersTypes.BLACK)
-	_place(e2, "c5", CheckersTypes.MAN, CheckersTypes.WHITE)
-	_place(e2, "e5", CheckersTypes.MAN, CheckersTypes.WHITE)
-	# Both forwards occupied but both are jumpable — jumps required.
-	_ok("blocked-by-enemy is jump", _count_from(e2, "d6") == 2, str(_count_from(e2, "d6")))
-	_ok("d6b4", _has(e2, "d6b4"))
-	_ok("d6f4", _has(e2, "d6f4"))
-	var e3 := _empty(CheckersTypes.WHITE)
-	_place(e3, "a1", CheckersTypes.MAN, CheckersTypes.WHITE)
-	_place(e3, "b2", CheckersTypes.MAN, CheckersTypes.WHITE)
-	_ok("corner man blocked", _count_from(e3, "a1") == 0)
+	section("blocked pieces")
+	var e := pos("english", "W:Wc3,b4,d4:Bh8")
+	eq("blocked white man 0", count_from(e, "c3"), 0)
+	var e2 := pos("english", "B:Wc5,e5:Bd6")
+	eq("blocked-by-enemy is jump", count_from(e2, "d6"), 2)
+	ok("d6b4", has(e2, "d6b4"))
+	ok("d6f4", has(e2, "d6f4"))
+	var e3 := pos("english", "W:Wa1,b2:Bh8")
+	eq("corner man blocked", count_from(e3, "a1"), 0)
 
 
 func _test_captures() -> void:
-	print("captures")
-	var e := _empty(CheckersTypes.BLACK)
-	_place(e, "c5", CheckersTypes.MAN, CheckersTypes.BLACK)
-	_place(e, "d4", CheckersTypes.MAN, CheckersTypes.WHITE)
-	var m := e.play(CheckersTypes.parse_square("c5"), CheckersTypes.parse_square("e3"))
-	_ok("capture played", m != null and m.is_capture())
-	_ok("landed e3", CheckersTypes.ptype(e.piece_at(CheckersTypes.parse_square("e3"))) == CheckersTypes.MAN)
-	_ok("captured removed", e.piece_at(CheckersTypes.parse_square("d4")) == 0)
-	_ok("origin empty", e.piece_at(CheckersTypes.parse_square("c5")) == 0)
-	_ok("side switched", e.side_to_move == CheckersTypes.WHITE)
-	var no := _empty(CheckersTypes.BLACK)
-	_place(no, "c5", CheckersTypes.MAN, CheckersTypes.BLACK)
-	_place(no, "d4", CheckersTypes.MAN, CheckersTypes.BLACK)
-	_ok("cannot jump own", not _has(no, "c5e3"))
-	var back := _empty(CheckersTypes.BLACK)
-	_place(back, "c5", CheckersTypes.MAN, CheckersTypes.BLACK)
-	_place(back, "d6", CheckersTypes.MAN, CheckersTypes.WHITE)
-	_ok("man cannot capture backward", not _has(back, "c5e7"))
+	section("captures")
+	var e := pos("english", "B:Wd4,a1:Bc5")
+	var m := play(e, "c5e3")
+	ok("capture played", m != null and m.is_capture())
+	ok("capture fields", m != null and m.captures == p("d4") and m.captured_pieces == PackedInt32Array([CheckersTypes.W_MAN]))
+	eq("landed e3", CheckersTypes.ptype(e.piece_at(sqa("e3"))), CheckersTypes.MAN)
+	eq("captured removed", e.piece_at(sqa("d4")), 0)
+	eq("origin empty", e.piece_at(sqa("c5")), 0)
+	eq("side switched", e.side_to_move, CheckersTypes.WHITE)
+	var no := pos("english", "B:Wa1:Bc5,d4")
+	ok("cannot jump own", not has(no, "c5e3"))
+	var back := pos("english", "B:Wd6,a1:Bc5")
+	ok("man cannot capture backward (english)", not has(back, "c5e7"))
+	ok("quiet moves instead", has(back, "c5b4") and has(back, "c5d4"))
 
 
 func _test_forced_capture() -> void:
-	print("forced capture")
-	var e := _empty(CheckersTypes.BLACK)
-	_place(e, "c5", CheckersTypes.MAN, CheckersTypes.BLACK)
-	_place(e, "a5", CheckersTypes.MAN, CheckersTypes.BLACK)
-	_place(e, "d4", CheckersTypes.MAN, CheckersTypes.WHITE)
-	_ok("only the jump is legal", _count(e) == 1, str(_count(e)))
-	_ok("jump c5e3", _has(e, "c5e3"))
-	_ok("quiet a5b4 forbidden", not _has(e, "a5b4"))
-	_ok("quiet c5b4 forbidden", not _has(e, "c5b4"))
-	_ok("play quiet rejected", e.play(CheckersTypes.parse_square("a5"), CheckersTypes.parse_square("b4")) == null)
+	section("forced capture")
+	var e := pos("english", "B:Wd4,h2:Bc5,a5")
+	eq("only the jump is legal", count(e), 1)
+	ok("jump c5e3", has(e, "c5e3"))
+	ok("must_capture", e.must_capture())
+	ok("quiet a5b4 forbidden", not has(e, "a5b4"))
+	ok("quiet c5b4 forbidden", not has(e, "c5b4"))
+	ok("play quiet rejected", e.play_path(p("a5", "b4")) == null)
+	eq("movable squares = capturer", e.movable_squares(), p("c5"))
 
 
 func _test_multi_jump() -> void:
-	print("multi-jump")
-	var e := _empty(CheckersTypes.BLACK)
-	_place(e, "c5", CheckersTypes.MAN, CheckersTypes.BLACK)
-	_place(e, "d4", CheckersTypes.MAN, CheckersTypes.WHITE)
-	_place(e, "f2", CheckersTypes.MAN, CheckersTypes.WHITE)
-	var first := e.play(CheckersTypes.parse_square("c5"), CheckersTypes.parse_square("e3"))
-	_ok("first hop", first != null and first.is_capture())
-	_ok("must continue", e.must_continue_sq == CheckersTypes.parse_square("e3"))
-	_ok("still black", e.side_to_move == CheckersTypes.BLACK)
-	_ok("only e3g1", _count(e) == 1 and _has(e, "e3g1"), str(_count(e)))
-	_ok("cannot switch piece", e.play(CheckersTypes.parse_square("c5"), CheckersTypes.parse_square("b4")) == null)
-	var second := e.play(CheckersTypes.parse_square("e3"), CheckersTypes.parse_square("g1"))
-	_ok("second hop", second != null)
-	_ok("promoted on last rank", CheckersTypes.ptype(e.piece_at(CheckersTypes.parse_square("g1"))) == CheckersTypes.KING)
-	_ok("both whites gone", e.piece_at(CheckersTypes.parse_square("d4")) == 0 and e.piece_at(CheckersTypes.parse_square("f2")) == 0)
-	_ok("turn ended after promo/sequence", e.must_continue_sq < 0)
-	_ok("white to move", e.side_to_move == CheckersTypes.WHITE)
-	_ok("same turn id", first.turn_id == second.turn_id)
-	var grouped := e.turn_groups()
-	_ok("one turn group", grouped.size() == 1)
-	_ok("notation multi", e.numbered_notation().contains("c5xe3xg1"), e.numbered_notation())
+	section("multi-jump (one full turn)")
+	var e := pos("english", "B:Wd4,f2,a1:Bc5")
+	eq("one legal move", count(e), 1)
+	eq("next landing after origin", e.next_landings(p("c5")), p("e3"))
+	eq("next landing after first hop", e.next_landings(p("c5", "e3")), p("g1"))
+	eq("complete path has no further landings", e.next_landings(p("c5", "e3", "g1")).size(), 0)
+	eq("candidates for origin", e.candidates_for_prefix(p("c5")).size(), 1)
+	var mv := e.play_path(p("c5", "e3", "g1"))
+	ok("full sequence played", mv != null and mv.capture_count() == 2)
+	ok("captures in order", mv != null and mv.captures == p("d4", "f2"))
+	ok("promoted on last rank", CheckersTypes.ptype(e.piece_at(sqa("g1"))) == CheckersTypes.KING)
+	ok("promote flags", mv != null and mv.promotes and mv.promote_index == 2)
+	ok("both whites gone", e.piece_at(sqa("d4")) == 0 and e.piece_at(sqa("f2")) == 0)
+	eq("white to move", e.side_to_move, CheckersTypes.WHITE)
+	eq("one history entry per turn", e.history.size(), 1)
+	eq("uci is full path", mv.to_uci() if mv else "", "c5e3g1")
+	eq("english notation numeric", mv.notation if mv else "", "14x23x32")
+	ok("numbered notation", e.numbered_notation() == "1. 14x23x32", e.numbered_notation())
+	var partial := pos("english", "B:Wd4,f2,a1:Bc5")
+	ok("partial path is not a move", partial.play_path(p("c5", "e3")) == null)
+	ok("find_uci abbreviated capture", partial.find_uci("14x32") != null)
+	ok("find_uci dashed algebraic", partial.find_uci("c5-e3-g1") != null)
+	ok("find_uci x algebraic", partial.find_uci("c5xe3xg1") != null)
+	ok("find_uci numeric full", partial.find_uci("14x23x32") != null)
+
+
+func _test_branching_prefix() -> void:
+	section("branching multi-jump input")
+	var e := pos("english", "B:Wd6,b4,d4,f2:Be7")
+	eq("two sequences", ucis(e), PackedStringArray(["e7c5a3", "e7c5e3g1"]))
+	eq("origin candidates", e.candidates_for_prefix(p("e7")).size(), 2)
+	eq("single first landing", e.next_landings(p("e7")), p("c5"))
+	eq("branch at c5", sorted_ints(e.next_landings(p("e7", "c5"))), sorted_ints(p("a3", "e3")))
+	eq("one candidate via e3", e.candidates_for_prefix(p("e7", "c5", "e3")).size(), 1)
+	eq("then g1", e.next_landings(p("e7", "c5", "e3")), p("g1"))
+	ok("a3 branch complete", e.find_path(p("e7", "c5", "a3")) != null and e.next_landings(p("e7", "c5", "a3")).is_empty())
+	eq("captured square is not a landing", e.candidates_for_prefix(p("e7", "d6")).size(), 0)
+	eq("empty prefix = all", e.candidates_for_prefix(PackedInt32Array()).size(), 2)
+	var long := e.find_path(p("e7", "c5", "e3", "g1"))
+	ok("long branch crowns at end", long != null and long.promotes and long.promote_index == 3 and long.capture_count() == 3)
+	eq("long notation", long.notation if long else "", "7x14x23x32")
+	eq("short notation", e.find_path(p("e7", "c5", "a3")).notation, "7x14x21")
+	ok("find_path rejects unknown", e.find_path(p("e7", "c5")) == null)
 
 
 func _test_promotion() -> void:
-	print("promotion")
-	var e := _empty(CheckersTypes.WHITE)
-	_place(e, "b7", CheckersTypes.MAN, CheckersTypes.WHITE)
-	var m := e.play(CheckersTypes.parse_square("b7"), CheckersTypes.parse_square("a8"))
-	_ok("promo move", m != null and m.is_promotion())
-	_ok("now king", CheckersTypes.ptype(e.piece_at(CheckersTypes.parse_square("a8"))) == CheckersTypes.KING)
-	_ok("white color kept", CheckersTypes.pcolor(e.piece_at(CheckersTypes.parse_square("a8"))) == CheckersTypes.WHITE)
-	var b := _empty(CheckersTypes.BLACK)
-	_place(b, "c2", CheckersTypes.MAN, CheckersTypes.BLACK)
-	var mb := b.play(CheckersTypes.parse_square("c2"), CheckersTypes.parse_square("d1"))
-	_ok("black promo", mb != null and mb.is_promotion())
-	_ok("black king", CheckersTypes.ptype(b.piece_at(CheckersTypes.parse_square("d1"))) == CheckersTypes.KING)
+	section("promotion")
+	var e := pos("english", "W:Wc7:Bh2")
+	var m := play(e, "c7b8")
+	ok("promo move", m != null and m.promotes and m.promote_index == 1)
+	eq("now king", CheckersTypes.ptype(e.piece_at(sqa("b8"))), CheckersTypes.KING)
+	eq("white color kept", CheckersTypes.pcolor(e.piece_at(sqa("b8"))), CheckersTypes.WHITE)
+	var b := pos("english", "B:Wa7:Bd2")
+	var mb := play(b, "d2c1")
+	ok("black promo", mb != null and mb.promotes)
+	eq("black king", CheckersTypes.ptype(b.piece_at(sqa("c1"))), CheckersTypes.KING)
+	eq("king count", b.king_count(CheckersTypes.BLACK), 1)
 
 
 func _test_promotion_ends_jump() -> void:
-	print("promotion ends jump")
-	var e := _empty(CheckersTypes.WHITE)
-	_place(e, "f6", CheckersTypes.MAN, CheckersTypes.WHITE)
-	_place(e, "e7", CheckersTypes.MAN, CheckersTypes.BLACK)
-	_place(e, "c7", CheckersTypes.MAN, CheckersTypes.BLACK)
-	# f6xe8 (d8) crowns. New king could jump c7 to b6, but English rules end the turn.
-	var m := e.play(CheckersTypes.parse_square("f6"), CheckersTypes.parse_square("d8"))
-	_ok("crowning jump", m != null and m.is_promotion() and m.is_capture())
-	_ok("is king", CheckersTypes.ptype(e.piece_at(CheckersTypes.parse_square("d8"))) == CheckersTypes.KING)
-	_ok("turn ended", e.must_continue_sq < 0)
-	_ok("black to move", e.side_to_move == CheckersTypes.BLACK)
-	_ok("c7 still there", e.piece_at(CheckersTypes.parse_square("c7")) != 0)
+	section("crowning ends the move (english)")
+	var e := pos("english", "W:Wf6:Be7,c7")
+	eq("only the crowning jump", ucis(e), PackedStringArray(["f6d8"]))
+	var m := play(e, "f6d8")
+	ok("crowning jump", m != null and m.promotes and m.is_capture())
+	eq("is king", CheckersTypes.ptype(e.piece_at(sqa("d8"))), CheckersTypes.KING)
+	eq("black to move", e.side_to_move, CheckersTypes.BLACK)
+	ok("c7 still there", e.piece_at(sqa("c7")) != 0)
 
 
 func _test_king_moves() -> void:
-	print("king moves")
-	var e := _empty(CheckersTypes.WHITE)
-	_place(e, "d4", CheckersTypes.KING, CheckersTypes.WHITE)
-	_ok("king 4 quiets", _count_from(e, "d4") == 4, str(_count_from(e, "d4")))
-	_ok("d4e5", _has(e, "d4e5"))
-	_ok("d4c5", _has(e, "d4c5"))
-	_ok("d4e3", _has(e, "d4e3"))
-	_ok("d4c3", _has(e, "d4c3"))
-	_ok("king not flying", not _has(e, "d4f6") and not _has(e, "d4a1"))
-	_place(e, "e5", CheckersTypes.MAN, CheckersTypes.WHITE)
-	_ok("king blocked one way", _count_from(e, "d4") == 3, str(_count_from(e, "d4")))
+	section("king moves")
+	var e := pos("english", "W:WKd4:Bh8")
+	eq("king 4 quiets", count_from(e, "d4"), 4)
+	ok("d4e5 d4c5 d4e3 d4c3", has(e, "d4e5") and has(e, "d4c5") and has(e, "d4e3") and has(e, "d4c3"))
+	ok("king not flying", not has(e, "d4f6") and not has(e, "d4a1"))
+	var e2 := pos("english", "W:WKd4,e5:Bh8")
+	eq("king blocked one way", count_from(e2, "d4"), 3)
+	var km := e.find_uci("d4e5")
+	ok("king move fields", km != null and km.piece == CheckersTypes.KING and not km.promotes)
 
 
 func _test_king_captures() -> void:
-	print("king captures")
-	var e := _empty(CheckersTypes.WHITE)
-	_place(e, "d4", CheckersTypes.KING, CheckersTypes.WHITE)
-	_place(e, "e5", CheckersTypes.MAN, CheckersTypes.BLACK)
-	_place(e, "c3", CheckersTypes.MAN, CheckersTypes.BLACK)
-	_ok("forced king jumps", _count(e) == 2, str(_count(e)))
-	_ok("d4f6", _has(e, "d4f6"))
-	_ok("d4b2", _has(e, "d4b2"))
-	_ok("no quiet while jump", not _has(e, "d4c5"))
-	e.play(CheckersTypes.parse_square("d4"), CheckersTypes.parse_square("f6"))
-	_ok("king captured", e.piece_at(CheckersTypes.parse_square("e5")) == 0)
-	_ok("king on f6", CheckersTypes.ptype(e.piece_at(CheckersTypes.parse_square("f6"))) == CheckersTypes.KING)
+	section("king captures")
+	var e := pos("english", "W:WKd4:Be5,c3")
+	eq("forced king jumps", count(e), 2)
+	ok("d4f6 and d4b2", has(e, "d4f6") and has(e, "d4b2"))
+	ok("no quiet while jump", not has(e, "d4c5"))
+	var m := play(e, "d4f6")
+	ok("king captured", m != null and e.piece_at(sqa("e5")) == 0)
+	eq("king on f6", CheckersTypes.ptype(e.piece_at(sqa("f6"))), CheckersTypes.KING)
+	var back := pos("english", "W:WKd4:Bc5")
+	ok("english king captures in any direction", has(back, "d4b6"))
+
+
+func _test_king_loop() -> void:
+	section("king may finish on its own origin")
+	var e := pos("english", "W:WKc1:Bd2,d4,b4,b2")
+	var loops := 0
+	for m in e.generate_legal_moves():
+		if m.from_sq() == m.to_sq() and m.capture_count() == 4:
+			loops += 1
+	eq("two loop directions", loops, 2)
+	var m := play(e, "c1e3c5a3c1")
+	ok("loop applied", m != null)
+	eq("all four captured", e.piece_count(CheckersTypes.BLACK), 0)
+	ok("king back on c1", e.piece_at(sqa("c1")) == CheckersTypes.W_KING)
+	e.undo()
+	eq("undo loop restores 4", e.piece_count(CheckersTypes.BLACK), 4)
+	ok("undo loop king on c1", e.piece_at(sqa("c1")) == CheckersTypes.W_KING)
 
 
 func _test_win_no_pieces() -> void:
-	print("win no pieces")
-	var e := _empty(CheckersTypes.WHITE)
-	_place(e, "c3", CheckersTypes.MAN, CheckersTypes.WHITE)
-	_place(e, "d4", CheckersTypes.MAN, CheckersTypes.BLACK)
-	e.play(CheckersTypes.parse_square("c3"), CheckersTypes.parse_square("e5"))
-	_ok("black has 0", e.piece_count(CheckersTypes.BLACK) == 0)
-	_ok("game over", e.game_over())
-	_ok("no pieces result", e.result == CheckersEngine.Result.NO_PIECES)
-	_ok("white wins", e.result_side == CheckersTypes.WHITE)
+	section("win: no pieces")
+	var e := pos("english", "W:Wc3:Bd4")
+	play(e, "c3e5")
+	eq("black has 0", e.piece_count(CheckersTypes.BLACK), 0)
+	ok("game over", e.game_over())
+	eq("no pieces result", e.result, CheckersEngine.Result.NO_PIECES)
+	eq("white wins", e.result_side, CheckersTypes.WHITE)
+	eq("reason", e.result_reason(), "No pieces")
+	eq("text", e.result_text(), "White wins — Black has no pieces")
+	ok("no moves after game over", play(e, "e5f6") == null)
 
 
 func _test_win_no_moves() -> void:
-	print("win no moves")
-	var e := _empty(CheckersTypes.BLACK)
-	# Black man on a1 (dark) has no backward/forward off-board; blocked.
-	# White king on b2 occupies the only adjacent dark. Black to move, no jumps (b2 is own-side? white is opponent — can jump?)
-	# a1 man black: forward is -rank, off the board. No quiet. Jump would need mid on off-board or...
-	# Better: white pieces occupy both forward squares and landings are off/occupied.
-	_place(e, "a1", CheckersTypes.MAN, CheckersTypes.BLACK)
-	_place(e, "b2", CheckersTypes.KING, CheckersTypes.WHITE)
-	_place(e, "c3", CheckersTypes.KING, CheckersTypes.WHITE)
-	# Black a1: no forward (off board). Jump NE would be b2 landing c3 — occupied. No moves.
-	e._refresh_result()
-	_ok("no legal moves", _count(e) == 0)
-	_ok("game over blocked", e.game_over())
-	_ok("no-moves result", e.result == CheckersEngine.Result.NO_MOVES)
-	_ok("white wins blocked", e.result_side == CheckersTypes.WHITE)
+	section("win: no moves")
+	var e := pos("english", "B:WKb2,Kc3:Ba1")
+	eq("no legal moves", count(e), 0)
+	ok("game over blocked", e.game_over())
+	eq("no-moves result", e.result, CheckersEngine.Result.NO_MOVES)
+	eq("white wins blocked", e.result_side, CheckersTypes.WHITE)
+	eq("text", e.result_text(), "White wins — Black has no moves")
+	eq("token", e.result_token(), "1-0")
 
 
 func _test_illegal_rejected() -> void:
-	print("illegal")
+	section("illegal moves")
 	var e := _e()
-	_ok("onto own", e.play(CheckersTypes.parse_square("a7"), CheckersTypes.parse_square("b6")) == null)
-	_ok("light square", e.play(CheckersTypes.parse_square("b6"), CheckersTypes.parse_square("b5")) == null)
-	_ok("empty origin", e.play(CheckersTypes.parse_square("a4"), CheckersTypes.parse_square("b5")) == null)
-	_ok("wrong side", e.play(CheckersTypes.parse_square("c3"), CheckersTypes.parse_square("d4")) == null)
-	_ok("off board", e.find_move(CheckersTypes.parse_square("h6"), CheckersTypes.parse_square("i5")) == null)
+	ok("onto own", e.play_path(p("a7", "b6")) == null)
+	ok("light square", e.play_path(p("b6", "b5")) == null)
+	ok("empty origin", e.play_path(p("a4", "b5")) == null)
+	ok("wrong side", e.play_path(p("c3", "d4")) == null)
+	ok("off board", e.find_uci("h6i5") == null)
+	ok("garbage", e.find_uci("zz") == null and e.find_uci("") == null and e.find_uci("99-100") == null)
+	ok("apply null", e.apply_move(null) == null)
+	var foreign := CheckersMove.new()
+	foreign.path = p("b6", "d4")
+	ok("apply foreign illegal move", e.apply_move(foreign) == null)
+	var legal_copy := CheckersMove.new()
+	legal_copy.path = p("b6", "c5")
+	var applied := e.apply_move(legal_copy)
+	ok("apply constructed legal path", applied != null and applied.notation == "9-14")
+	eq("history untouched on failures", e.history.size(), 1)
 
 
 func _test_undo_redo() -> void:
-	print("undo redo")
+	section("undo / redo")
 	var e := _e()
 	var fen0 := e.to_fen()
-	e.play(CheckersTypes.parse_square("b6"), CheckersTypes.parse_square("c5"))
-	e.play(CheckersTypes.parse_square("c3"), CheckersTypes.parse_square("d4"))
-	_ok("two hops stored", e.history.size() == 2)
-	e.undo_turn()
-	_ok("undo one turn", e.side_to_move == CheckersTypes.WHITE)
-	e.undo_turn()
-	_ok("back to start side", e.side_to_move == CheckersTypes.BLACK)
-	_ok("fen restored", e.to_fen().split(" ")[0] == fen0.split(" ")[0])
-	e.redo_turn()
-	_ok("redo", e.piece_at(CheckersTypes.parse_square("c5")) != 0)
-	var multi := _empty(CheckersTypes.BLACK)
-	_place(multi, "c5", CheckersTypes.MAN, CheckersTypes.BLACK)
-	_place(multi, "d4", CheckersTypes.MAN, CheckersTypes.WHITE)
-	_place(multi, "f2", CheckersTypes.MAN, CheckersTypes.WHITE)
-	multi.play(CheckersTypes.parse_square("c5"), CheckersTypes.parse_square("e3"))
-	multi.play(CheckersTypes.parse_square("e3"), CheckersTypes.parse_square("g1"))
-	multi.undo_turn()
-	_ok("undo multi restores both", multi.piece_at(CheckersTypes.parse_square("c5")) != 0)
-	_ok("whites restored", multi.piece_at(CheckersTypes.parse_square("d4")) != 0 and multi.piece_at(CheckersTypes.parse_square("f2")) != 0)
-	_ok("black to move after undo multi", multi.side_to_move == CheckersTypes.BLACK)
+	var key0 := e.hash_key()
+	play(e, "b6c5")
+	play(e, "c3d4")
+	eq("two turns stored", e.history.size(), 2)
+	ok("can undo", e.can_undo())
+	ok("undo returns move", e.undo() != null)
+	eq("undo one turn", e.side_to_move, CheckersTypes.WHITE)
+	e.undo()
+	eq("back to start side", e.side_to_move, CheckersTypes.BLACK)
+	eq("fen restored", e.to_fen(), fen0)
+	eq("hash restored", e.hash_key(), key0)
+	ok("undo on empty history", e.undo() == null)
+	ok("can redo", e.can_redo())
+	var r := e.redo()
+	ok("redo", r != null and e.piece_at(sqa("c5")) != 0)
+	eq("redo notation", r.notation if r else "", "9-14")
+	eq("redo stack shrinks", e.redo_stack.size(), 1)
+	play(e, "c3b4")
+	eq("new move clears redo", e.redo_stack.size(), 0)
+	ok("cannot redo", not e.can_redo() and e.redo() == null)
 
 
-func _test_fen_roundtrip() -> void:
-	print("fen")
+func _test_undo_redo_multi() -> void:
+	section("undo / redo multi-jump turn")
+	var multi := pos("english", "B:Wd4,f2,h2:Bc5")
+	var fen0 := multi.to_fen()
+	play(multi, "c5e3g1")
+	multi.undo()
+	ok("undo multi restores origin", multi.piece_at(sqa("c5")) == CheckersTypes.B_MAN)
+	ok("whites restored", multi.piece_at(sqa("d4")) == CheckersTypes.W_MAN and multi.piece_at(sqa("f2")) == CheckersTypes.W_MAN)
+	eq("no crowned piece left", multi.piece_at(sqa("g1")), 0)
+	eq("black to move after undo multi", multi.side_to_move, CheckersTypes.BLACK)
+	eq("fen identical", multi.to_fen(), fen0)
+	var r := multi.redo()
+	ok("redo multi", r != null and r.capture_count() == 2 and multi.piece_at(sqa("g1")) == CheckersTypes.B_KING)
+	# Undo is blocked by resignation / timeout like v1.
 	var e := _e()
-	e.play(CheckersTypes.parse_square("b6"), CheckersTypes.parse_square("c5"))
-	var fen := e.to_fen()
-	var e2 := _e()
-	_ok("parse", e2.from_fen(fen))
-	_ok("roundtrip board", e2.to_fen().split(" ")[0] == fen.split(" ")[0])
-	_ok("roundtrip side", e2.side_to_move == e.side_to_move)
-	var mid := _empty(CheckersTypes.BLACK)
-	_place(mid, "c5", CheckersTypes.MAN, CheckersTypes.BLACK)
-	_place(mid, "d4", CheckersTypes.MAN, CheckersTypes.WHITE)
-	_place(mid, "f2", CheckersTypes.MAN, CheckersTypes.WHITE)
-	mid.play(CheckersTypes.parse_square("c5"), CheckersTypes.parse_square("e3"))
-	var f2 := mid.to_fen()
-	var e3 := _e()
-	e3.from_fen(f2)
-	_ok("continue square in fen", e3.must_continue_sq == CheckersTypes.parse_square("e3"), f2)
-	_ok("continue jumps", _has(e3, "e3g1"))
+	play(e, "b6c5")
+	e.resign(CheckersTypes.WHITE)
+	ok("no undo after resignation", not e.can_undo())
+	var t := _e()
+	play(t, "b6c5")
+	t.flag_timeout(CheckersTypes.BLACK)
+	ok("no undo after timeout", not t.can_undo())
+	var d := _e()
+	play(d, "b6c5")
+	d.agree_draw()
+	ok("undo allowed after agreed draw", d.can_undo())
+	ok("no redo while over", not d.can_redo())
 
 
 func _test_black_moves_first() -> void:
-	print("english first move")
-	var e := _e()
-	_ok("official black first", e.side_to_move == CheckersTypes.BLACK)
-	_ok("white pieces on ranks 1-3", CheckersTypes.rank_of(CheckersTypes.parse_square("a1")) == 0)
-	_ok("a1 white man", CheckersTypes.pcolor(e.piece_at(CheckersTypes.parse_square("a1"))) == CheckersTypes.WHITE)
+	section("english first move")
+	eq("rules: black first", CheckersRules.first_to_move("english"), CheckersTypes.BLACK)
+	eq("engine black first", _e().side_to_move, CheckersTypes.BLACK)
+	eq("a1 white man", _e().piece_at(sqa("a1")), CheckersTypes.W_MAN)
+	eq("h8 black man", _e().piece_at(sqa("h8")), CheckersTypes.B_MAN)
 
 
 func _test_perft_start() -> void:
-	print("perft")
+	section("perft (full turns)")
 	var e := _e()
-	_ok("perft 1 = 7", e.perft(1) == 7, str(e.perft(1)))
-	var p2 := e.perft(2)
-	_ok("perft 2 = 49", p2 == 49, str(p2))
-	# Depth 3 is 7*7*7 if no captures open; captures appear after some 2-move sequences.
-	var p3 := e.perft(3)
-	_ok("perft 3 > 200", p3 > 200, str(p3))
+	var want := [1, 7, 49, 302, 1469, 7361, 36768]
+	for d in range(1, 7):
+		eq("perft %d" % d, e.perft(d), want[d])
+	eq("perft leaves position intact", e.to_fen(), CheckersRules.start_fen("english"))
+	eq("perft 0", e.perft(0), 1)
 
 
-func _test_draw_40_move() -> void:
-	print("forty-move draw")
-	var e := _empty(CheckersTypes.WHITE)
-	_place(e, "a1", CheckersTypes.KING, CheckersTypes.WHITE)
-	_place(e, "h8", CheckersTypes.KING, CheckersTypes.BLACK)
-	e._rebuild_pos_keys()
-	e.halfmove = 79
-	e.play(CheckersTypes.parse_square("a1"), CheckersTypes.parse_square("b2"))
-	_ok("40-move draw after 80 quiets", e.result == CheckersEngine.Result.DRAW_40_MOVE, str(e.result))
-	_ok("draw is game over", e.game_over())
-	_ok("no winner", e.result_side == -1)
+func _test_draw_move_rule() -> void:
+	section("move-rule draw (english 80 plies)")
+	var e := pos("english", "W:WKa1:BKh8:H79")
+	eq("halfmove from FEN", e.halfmove, 79)
+	play(e, "a1b2")
+	eq("draw after 80 king plies", e.result, CheckersEngine.Result.DRAW_MOVE_RULE)
+	ok("draw is game over", e.game_over())
+	eq("no winner", e.result_side, -1)
+	eq("reason", e.result_reason(), "Move rule")
+	eq("token", e.result_token(), "1/2-1/2")
+	var m := pos("english", "W:Wc3,Ka1:BKh8:H79")
+	play(m, "c3d4")
+	eq("man move resets counter", m.halfmove, 0)
+	ok("man move avoids the draw", not m.game_over())
+	var c := pos("english", "W:WKc3:Bd4,Kh8:H79")
+	play(c, "c3e5")
+	eq("capture resets counter", c.halfmove, 0)
+	var k := pos("english", "W:WKa1:BKh8:H10")
+	play(k, "a1b2")
+	eq("king move increments", k.halfmove, 11)
+	k.undo()
+	eq("undo restores counter", k.halfmove, 10)
 
 
 func _test_draw_repetition() -> void:
-	print("repetition draw")
-	var e := _empty(CheckersTypes.WHITE)
-	_place(e, "c3", CheckersTypes.KING, CheckersTypes.WHITE)
-	_place(e, "g7", CheckersTypes.KING, CheckersTypes.BLACK)
-	e._rebuild_pos_keys()
-	# Oscillate the white king, then black, three times to the same full position.
-	var cycle := [
-		["c3", "d4"], ["g7", "f6"],
-		["d4", "c3"], ["f6", "g7"],
-		["c3", "d4"], ["g7", "f6"],
-		["d4", "c3"], ["f6", "g7"],
-	]
-	for hop in cycle:
-		var m := e.play(CheckersTypes.parse_square(hop[0]), CheckersTypes.parse_square(hop[1]))
-		_ok("cycle hop %s-%s" % [hop[0], hop[1]], m != null)
+	section("threefold repetition")
+	var e := pos("english", "W:WKc3:BKg7")
+	eq("start counted once", e.repetition_count(), 1)
+	var cycle := ["c3d4", "g7f6", "d4c3", "f6g7", "c3d4", "g7f6", "d4c3", "f6g7"]
+	var played := 0
+	for u in cycle:
+		if play(e, u) == null:
+			break
+		played += 1
 		if e.game_over():
 			break
-	_ok("threefold draw", e.result == CheckersEngine.Result.DRAW_REPETITION, e.result_text())
+	eq("played all 8", played, 8)
+	eq("threefold draw", e.result, CheckersEngine.Result.DRAW_REPETITION)
+	eq("repetition count 3", e.repetition_count(), 3)
+	eq("reason", e.result_reason(), "Threefold repetition")
+	e.undo()
+	ok("undo clears repetition draw", not e.game_over())
+	eq("count back to 2", e.repetition_count(), 2)
 
 
-func _test_unique_destination() -> void:
-	print("unique destination")
+func _test_movable_squares() -> void:
+	section("movable squares / legal_from")
 	var e := _e()
-	var dest := CheckersTypes.parse_square("a5")
-	var m := e.unique_move_to(dest)
-	_ok("start a5 unique from b6", m != null and m.from_sq == CheckersTypes.parse_square("b6"))
-	var squares := e.movable_squares()
-	_ok("four black men can move at start", squares.size() == 4, str(squares.size()))
+	eq("four black men can move at start", e.movable_squares().size(), 4)
+	eq("b6 has two moves", e.legal_from(sqa("b6")).size(), 2)
+	eq("a7 has none", e.legal_from(sqa("a7")).size(), 0)
 
 
-func _test_ai_returns_quickly() -> void:
-	print("ai time budget")
+func _test_results_and_tokens() -> void:
+	section("results and PDN tokens")
 	var e := _e()
-	for diff in ["easy", "medium", "hard", "master"]:
-		var t0 := Time.get_ticks_msec()
-		var move := CheckersAI.choose(e, diff)
-		var dt := Time.get_ticks_msec() - t0
-		_ok("%s returns a move" % diff, move != null, str(dt))
-		_ok("%s under 2.2s" % diff, dt < 2200, str(dt))
-		_ok("%s move is legal" % diff, e.find_uci(move.to_uci()) != null)
+	eq("ongoing token", e.result_token(), "*")
+	eq("ongoing text", e.result_text(), "Black to move")
+	eq("ongoing reason", e.result_reason(), "")
+	e.resign(CheckersTypes.BLACK)
+	eq("black resigns -> 1-0", e.result_token(), "1-0")
+	eq("resign text", e.result_text(), "Black resigns — White wins")
+	eq("resign reason", e.result_reason(), "Resignation")
+	var w := _e()
+	w.resign(CheckersTypes.WHITE)
+	eq("white resigns -> 0-1", w.result_token(), "0-1")
+	var t := _e()
+	t.flag_timeout(CheckersTypes.WHITE)
+	eq("timeout token", t.result_token(), "0-1")
+	eq("timeout reason", t.result_reason(), "Time forfeit")
+	ok("timeout text", t.result_text().begins_with("Black wins on time"), t.result_text())
+	var d := _e()
+	d.agree_draw()
+	eq("agreed token", d.result_token(), "1/2-1/2")
+	eq("agreed reason", d.result_reason(), "Agreement")
+	ok("apply refused when over", play(d, "b6c5") == null)
 
 
-func _test_ai_job_and_playthrough() -> void:
-	print("ai job and playthrough")
-	var job := CheckersAI.SearchJob.new()
-	job.fen = CheckersTypes.START_FEN
-	job.difficulty = "easy"
-	job.run()
-	_ok("job produced uci", job.move_uci.length() >= 4, job.move_uci)
+func _test_clone_and_cache() -> void:
+	section("clone and cache")
 	var e := _e()
-	var first := e.find_uci(job.move_uci)
-	_ok("job move legal on start", first != null)
-	e.apply_move(first)
+	play(e, "b6c5")
+	var c := e.clone()
+	eq("clone fen", c.to_fen(), e.to_fen())
+	eq("clone history", c.history.size(), 1)
+	eq("clone hash", c.hash_key(), e.hash_key())
+	play(c, "c3d4")
+	eq("clone independent", e.history.size(), 1)
+	var a := e.generate_legal_moves()
+	a.clear()
+	ok("returned array is a copy", e.generate_legal_moves().size() > 0)
+	c.undo()
+	eq("clone undo matches", c.to_fen(), e.to_fen())
+
+
+func _test_hash_incremental() -> void:
+	section("incremental zobrist")
+	var e := _e()
 	var rng := RandomNumberGenerator.new()
-	rng.seed = 42
-	var ply := 0
-	while not e.game_over() and ply < 80:
-		var moves := e.generate_legal_moves()
-		if moves.is_empty():
+	rng.seed = 7
+	var good := true
+	for i in 60:
+		var ms := e.generate_legal_moves()
+		if ms.is_empty() or e.game_over():
 			break
-		var pick: CheckersMove
-		if ply % 2 == 0:
-			pick = CheckersAI.choose(e, "easy")
-			if pick == null:
-				pick = moves[0]
-		else:
-			pick = moves[rng.randi_range(0, moves.size() - 1)]
-		if e.apply_move(pick) == null:
-			break
-		ply += 1
-	_ok("playthrough made moves", ply > 4, str(ply))
-	if e.game_over():
-		_ok("ended with a real result", e.result != CheckersEngine.Result.NONE)
-		_ok("result text not empty", not e.result_text().is_empty())
+		e.apply_move(ms[rng.randi_range(0, ms.size() - 1)])
+		var fresh := CheckersEngine.new("english")
+		fresh.from_fen(e.to_fen())
+		if fresh.hash_key() != e.hash_key():
+			good = false
+	ok("incremental hash equals recomputed", good)
+	var sq := pos("english", "W:Wc3:Bf6")
+	var sw := pos("english", "B:Wc3:Bf6")
+	ok("side to move changes hash", sq.hash_key() != sw.hash_key())
+
+
+func _test_generation_speed() -> void:
+	section("UI generation speed")
+	var e := _e()
+	for u in ["b6a5", "c3d4", "f6g5", "b2c3", "g7f6", "d2e3"]:
+		play(e, u)
+	var t0 := Time.get_ticks_usec()
+	for i in 50:
+		e._cache_ok = false
+		e.generate_legal_moves()
+	var per := (Time.get_ticks_usec() - t0) / 50.0
+	ok("generate_legal_moves under 2 ms (%.0f us)" % per, per < 2000.0)
