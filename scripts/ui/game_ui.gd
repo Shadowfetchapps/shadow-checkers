@@ -1,18 +1,51 @@
 extends CanvasLayer
 
+## In-game HUD: brand and status, player cards with clocks and captures,
+## scoresheet with review controls, actions, evaluation bar, puzzle panel,
+## and the overlays (pause, settings, help, result).
+
+const PANEL_W := 372
+const MARGIN := 16
+
 var controller: GameController
-var _status: Label
-var _clock_w: Label
-var _clock_b: Label
-var _history: RichTextLabel
-var _cap_w: Label
-var _cap_b: Label
-var _pause: PanelContainer
-var _end: PanelContainer
-var _fen_box: LineEdit
-var _thinking: Label
-var _turn_chip: Label
-var _diff: Label
+var root: Control
+var _icons: PieceIcons
+var _toasts: ToastLayer
+
+var _mode_label: Label
+var _pill: PanelContainer
+var _pill_icon: TextureRect
+var _pill_label: Label
+var _pill_dots := 0.0
+var _card_top: PlayerCard
+var _card_bottom: PlayerCard
+var _moves: MoveList
+var _nav: Array[Button] = []
+var _live_btn: Button
+var _move_entry: LineEdit
+var _pv: Label
+var _eval_bar: EvalBar
+var _eval_caption: Label
+var _hint_label: Label
+var _act_undo: Button
+var _act_redo: Button
+var _act_hint: Button
+var _act_draw: Button
+var _act_resign: Button
+var _puzzle_box: VBoxContainer
+var _puzzle_title: Label
+var _puzzle_goal: Label
+var _puzzle_meta: Label
+var _puzzle_feedback: Label
+var _puzzle_next: Button
+var _standard_box: VBoxContainer
+
+var _pause: Modal
+var _help: HelpOverlay
+var _end: EndCard
+var _paste: Modal
+var _paste_edit: TextEdit
+var _file_dialog: FileDialog
 
 
 func _ready() -> void:
@@ -20,376 +53,496 @@ func _ready() -> void:
 	controller = get_parent().get_node("World") as GameController
 	_build()
 	controller.state_changed.connect(_refresh)
-	controller.game_ended.connect(_show_end)
+	controller.game_finished.connect(_on_game_finished)
+	controller.thinking_changed.connect(func(_on): _refresh())
+	controller.eval_updated.connect(_on_eval)
+	controller.hint_shown.connect(func(t): _toasts.show_toast(t, "hint", 3.2))
+	controller.view_changed.connect(func(_p, _l): _refresh())
+	controller.toast.connect(func(t, k): _toasts.show_toast(t, k))
+	controller.puzzle_event.connect(_on_puzzle_event)
+	controller.clock_low.connect(func(side):
+		if controller._is_human(side):
+			_toasts.show_toast("Ten seconds left", "error", 1.6)
+	)
+	controller.move_played.connect(func(_m): _fade_hint())
+	get_viewport().size_changed.connect(_update_insets)
+	_update_insets()
+	_icons.render()
 	_refresh()
 
 
-func _process(_delta: float) -> void:
-	if controller == null:
-		return
-	if controller.is_ai_thinking():
-		_thinking.visible = true
-		_thinking.modulate.a = 0.55 + 0.45 * sin(Time.get_ticks_msec() * 0.006)
-		_status.text = controller.turn_status()
-		_paint_turn_chip()
-	elif _thinking.visible:
-		_thinking.visible = false
-		_thinking.modulate.a = 1.0
-
-
 func _build() -> void:
-	var root := Control.new()
+	root = Control.new()
 	root.set_anchors_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.theme = ThemeFactory.make()
 	add_child(root)
-	root.add_child(_top_bar())
+	_icons = PieceIcons.new()
+	_icons.icons_ready.connect(_refresh)
+	add_child(_icons)
+
+	# Brand, top left.
+	var brand := UIKit.vbox(2)
+	brand.position = Vector2(28, 20)
+	brand.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var title := UIKit.label("SHADOW CHECKERS", "Kicker")
+	title.add_theme_font_size_override("font_size", 14)
+	brand.add_child(title)
+	_mode_label = UIKit.label("", "Caption")
+	brand.add_child(_mode_label)
+	root.add_child(brand)
+
+	# Status pill, top centre of the free area.
+	_pill = PanelContainer.new()
+	_pill.theme_type_variation = "Pill"
+	_pill.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	_pill.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_pill.offset_top = 18
+	_pill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var pr := UIKit.hbox(10)
+	_pill_icon = UIKit.icon_rect("clock", 16)
+	pr.add_child(_pill_icon)
+	_pill_label = UIKit.label("", "Subheader")
+	pr.add_child(_pill_label)
+	_pill.add_child(pr)
+	root.add_child(_pill)
+
+	# Evaluation bar, left edge.
+	var eval_wrap := UIKit.vbox(6)
+	eval_wrap.set_anchors_preset(Control.PRESET_LEFT_WIDE)
+	eval_wrap.offset_left = 24
+	eval_wrap.offset_right = 24 + 28
+	eval_wrap.offset_top = 150
+	eval_wrap.offset_bottom = -150
+	eval_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_eval_bar = EvalBar.new()
+	_eval_bar.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	eval_wrap.add_child(_eval_bar)
+	_eval_caption = UIKit.label("", "Faint")
+	_eval_caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	eval_wrap.add_child(_eval_caption)
+	eval_wrap.name = "EvalWrap"
+	root.add_child(eval_wrap)
+
+	# Controls hint, bottom left; fades after the first move.
+	_hint_label = UIKit.label("Click a disc, then each landing square  ·  Right-drag to orbit  ·  Wheel to zoom  ·  F1 help", "Faint")
+	_hint_label.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_hint_label.offset_left = 28
+	_hint_label.offset_top = -40
+	_hint_label.offset_bottom = -20
+	_hint_label.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	root.add_child(_hint_label)
+
 	root.add_child(_side_panel())
-	root.add_child(_bottom_bar())
-	_thinking = Label.new()
-	_thinking.text = "Shadow is thinking…"
-	_thinking.visible = false
-	_thinking.add_theme_color_override("font_color", ThemeFactory.accent())
-	_thinking.add_theme_font_size_override("font_size", 18)
-	_thinking.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_thinking.offset_left = -180
-	_thinking.offset_right = 180
-	_thinking.offset_top = 78
-	_thinking.offset_bottom = 108
-	_thinking.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	root.add_child(_thinking)
+
+	_toasts = ToastLayer.new()
+	root.add_child(_toasts)
 	_pause = _make_pause()
 	root.add_child(_pause)
-	_end = _make_end()
+	_help = HelpOverlay.new()
+	root.add_child(_help)
+	_end = EndCard.new()
+	_end.rematch_requested.connect(func(swap): controller.restart(swap))
+	_end.review_requested.connect(func(): controller.set_view_ply(0))
+	_end.export_requested.connect(_export_pdn_file)
+	_end.menu_requested.connect(_to_menu)
 	root.add_child(_end)
-
-
-func _top_bar() -> PanelContainer:
-	var bar := PanelContainer.new()
-	bar.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	bar.offset_left = 16
-	bar.offset_right = -16
-	bar.offset_top = 12
-	bar.offset_bottom = 70
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 10)
-	bar.add_child(row)
-	var title := Label.new()
-	title.text = "SHADOW CHECKERS"
-	var df: FontFile = load("res://assets/fonts/InterDisplay-SemiBold.ttf")
-	if df:
-		title.add_theme_font_override("font", df)
-	title.add_theme_font_size_override("font_size", 20)
-	title.add_theme_color_override("font_color", ThemeFactory.accent())
-	row.add_child(title)
-	_turn_chip = Label.new()
-	_turn_chip.text = "Black to move"
-	_turn_chip.add_theme_font_size_override("font_size", 14)
-	_turn_chip.add_theme_color_override("font_color", ThemeFactory.gold())
-	row.add_child(_turn_chip)
-	_status = Label.new()
-	_status.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	row.add_child(_status)
-	row.add_child(_btn("New Game", _new_game))
-	row.add_child(_btn("Undo", controller.undo))
-	row.add_child(_btn("Redo", controller.redo))
-	row.add_child(_btn("Flip", controller.flip_board))
-	row.add_child(_btn("Pause", _toggle_pause))
-	return bar
+	_paste = _make_paste()
+	root.add_child(_paste)
 
 
 func _side_panel() -> PanelContainer:
 	var panel := PanelContainer.new()
 	panel.set_anchors_preset(Control.PRESET_RIGHT_WIDE)
-	panel.offset_left = -328
-	panel.offset_right = -16
-	panel.offset_top = 84
-	panel.offset_bottom = -90
-	var v := VBoxContainer.new()
-	v.add_theme_constant_override("separation", 10)
+	panel.offset_left = -(PANEL_W + MARGIN)
+	panel.offset_right = -MARGIN
+	panel.offset_top = MARGIN
+	panel.offset_bottom = -MARGIN
+	var v := UIKit.vbox(12)
 	panel.add_child(v)
-	v.add_child(_heading("Players"))
-	_diff = Label.new()
-	_diff.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	v.add_child(_diff)
-	v.add_child(_heading("Clocks"))
-	var clocks := HBoxContainer.new()
-	_clock_w = _clock_label("White  ∞")
-	_clock_b = _clock_label("Black  ∞")
-	clocks.add_child(_clock_w)
-	clocks.add_child(_clock_b)
-	v.add_child(clocks)
-	v.add_child(_heading("Captured"))
-	_cap_w = Label.new()
-	_cap_b = Label.new()
-	_cap_w.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_cap_b.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	v.add_child(_cap_w)
-	v.add_child(_cap_b)
-	v.add_child(_heading("Move history"))
-	_history = RichTextLabel.new()
-	_history.bbcode_enabled = true
-	_history.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_history.scroll_following = true
-	_history.fit_content = false
-	v.add_child(_history)
-	v.add_child(_heading("Position"))
-	_fen_box = LineEdit.new()
-	_fen_box.editable = true
-	v.add_child(_fen_box)
-	var fen_row := HBoxContainer.new()
-	fen_row.add_child(_btn("Copy", func(): DisplayServer.clipboard_set(controller.export_fen())))
-	fen_row.add_child(_btn("Load", _load_fen))
-	v.add_child(fen_row)
+
+	var head := UIKit.hbox(6)
+	var head_title := UIKit.label(GameSession.mode_label().to_upper(), "Kicker")
+	head_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head_title.clip_text = true
+	head.add_child(head_title)
+	head.add_child(UIKit.icon_button("help", "Controls and rules (F1)", func(): _help.open(), 17))
+	head.add_child(UIKit.icon_button("settings", "Settings", _open_settings, 17))
+	head.add_child(UIKit.icon_button("menu", "Game menu (Esc)", _toggle_pause, 17))
+	v.add_child(head)
+
+	_standard_box = UIKit.vbox(12)
+	_card_top = PlayerCard.new()
+	_standard_box.add_child(_card_top)
+	v.add_child(_standard_box)
+
+	_puzzle_box = UIKit.vbox(6)
+	var pc := PanelContainer.new()
+	pc.theme_type_variation = "CardActive"
+	var pv := UIKit.vbox(6)
+	pc.add_child(pv)
+	_puzzle_title = UIKit.label("", "Header")
+	_puzzle_title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	pv.add_child(_puzzle_title)
+	_puzzle_goal = UIKit.label("", "Gold")
+	pv.add_child(_puzzle_goal)
+	_puzzle_meta = UIKit.label("", "Caption")
+	pv.add_child(_puzzle_meta)
+	_puzzle_feedback = UIKit.label("Find the winning shot.", "Muted", true)
+	pv.add_child(_puzzle_feedback)
+	_puzzle_box.add_child(pc)
+	v.add_child(_puzzle_box)
+
+	_moves = MoveList.new()
+	_moves.ply_selected.connect(func(p): controller.set_view_ply(p))
+	v.add_child(_moves)
+
+	var nav := UIKit.hbox(6)
+	for spec in [["first", "First position (Home)", func(): controller.set_view_ply(0)],
+			["chevron_left", "Previous move (←)", func(): controller.step_view(-1)],
+			["chevron_right", "Next move (→)", func(): controller.step_view(1)],
+			["last", "Latest position (End)", func(): controller.set_view_ply(controller.engine.history.size())]]:
+		var b := UIKit.icon_button(spec[0], spec[1], spec[2], 16)
+		nav.add_child(b)
+		_nav.append(b)
+	nav.add_child(UIKit.spacer())
+	_live_btn = UIKit.button("Back to game", func(): controller.set_view_ply(controller.engine.history.size()), "GhostButton", "arrow_right")
+	nav.add_child(_live_btn)
+	v.add_child(nav)
+
+	_move_entry = LineEdit.new()
+	_move_entry.placeholder_text = "Type a move — 11-15, 22x15x6, c3d4…"
+	_move_entry.clear_button_enabled = true
+	_move_entry.tooltip_text = "Enter a move in PDN numbers or square names and press Enter."
+	_move_entry.text_submitted.connect(func(t: String):
+		if controller.play_text(t):
+			_move_entry.clear()
+		_move_entry.release_focus()
+	)
+	v.add_child(_move_entry)
+
+	_pv = UIKit.label("", "Caption", true)
+	_pv.visible = false
+	v.add_child(_pv)
+
+	_card_bottom = PlayerCard.new()
+	v.add_child(_card_bottom)
+
+	var actions := UIKit.hbox(6)
+	actions.alignment = BoxContainer.ALIGNMENT_CENTER
+	_act_undo = UIKit.icon_button("undo", "Take back (Ctrl+Z)", func(): controller.undo())
+	_act_redo = UIKit.icon_button("redo", "Replay (Ctrl+Y)", func(): controller.redo())
+	_act_hint = UIKit.icon_button("hint", "Hint (H)", func(): controller.request_hint())
+	var flip := UIKit.icon_button("flip", "Flip board (F)", func(): controller.flip_board())
+	var top := UIKit.icon_button("grid", "Top-down view (T)", func(): controller.camera_rig.toggle_top_view())
+	_act_draw = UIKit.icon_button("draw", "Offer a draw", _offer_draw)
+	_act_resign = UIKit.icon_button("flag", "Resign", _resign)
+	for b in [_act_undo, _act_redo, _act_hint, flip, top, _act_draw, _act_resign]:
+		actions.add_child(b)
+	var puzzle_actions := UIKit.hbox(8)
+	puzzle_actions.add_child(UIKit.button("Retry", func(): controller.restart_puzzle(), "", "restart"))
+	_puzzle_next = UIKit.button("Next puzzle", _next_puzzle, "PrimaryButton", "arrow_right")
+	puzzle_actions.add_child(_puzzle_next)
+	puzzle_actions.name = "PuzzleActions"
+	var all_btn := UIKit.icon_button("target", "All puzzles", func(): _to_menu("puzzles"))
+	puzzle_actions.add_child(all_btn)
+	v.add_child(actions)
+	v.add_child(puzzle_actions)
+
+	var puzzle := GameSession.mode == GameSession.Mode.PUZZLE
+	_puzzle_box.visible = puzzle
+	puzzle_actions.visible = puzzle
+	_standard_box.visible = not puzzle
+	_card_bottom.visible = not puzzle
+	for b in [_act_undo, _act_redo, _act_draw, _act_resign, top]:
+		b.visible = not puzzle
+	if GameSession.mode == GameSession.Mode.ANALYSIS:
+		_act_draw.visible = false
+		_act_resign.visible = false
 	return panel
 
 
-func _bottom_bar() -> PanelContainer:
-	var bar := PanelContainer.new()
-	bar.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
-	bar.offset_left = 16
-	bar.offset_right = -344
-	bar.offset_top = -78
-	bar.offset_bottom = -16
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 10)
-	bar.add_child(row)
-	row.add_child(_btn("Save", func(): _toast_save(controller.save_now())))
-	row.add_child(_btn("Resign", controller.resign))
-	row.add_child(_btn("Menu", _to_menu))
-	var hint := Label.new()
-	hint.text = "Click a piece, then a square   ·   click destination   ·   RMB orbit   ·   H reset   ·   F flip   ·   Z undo"
-	hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	hint.add_theme_font_size_override("font_size", 12)
-	hint.add_theme_color_override("font_color", ThemeFactory.muted())
-	row.add_child(hint)
-	return bar
+func _make_pause() -> Modal:
+	var m := Modal.new("Paused", 420)
+	var items := [
+		["Resume", _toggle_pause, "PrimaryButton", "play"],
+		["Save game", func(): controller.save_now(), "", "save"],
+		["Save PDN file…", _export_pdn_file, "", "download"],
+		["Copy PDN", func(): DisplayServer.clipboard_set(controller.export_pdn()); _toasts.show_toast("PDN copied", "success"), "", "copy"],
+		["Copy FEN", func(): DisplayServer.clipboard_set(controller.export_fen()); _toasts.show_toast("FEN copied", "success"), "", "copy"],
+	]
+	if GameSession.mode in [GameSession.Mode.ANALYSIS, GameSession.Mode.LOCAL]:
+		items.append(["Load FEN or PDN…", func(): _pause.close(); _paste.open(), "", "upload"])
+	items.append(["Settings", func(): _open_settings(), "", "settings"])
+	items.append(["Controls and rules", func(): _help.open(), "", "help"])
+	items.append(["Main menu", func(): _to_menu(), "GhostButton", "menu"])
+	items.append(["Quit to desktop", func(): get_tree().quit(), "GhostButton", "close"])
+	for it in items:
+		var b := UIKit.button(it[0], it[1], it[2], it[3])
+		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		b.custom_minimum_size.y = 42
+		m.body.add_child(b)
+	m.closed.connect(func(): controller.set_paused(false); AudioManager.duck_music(false))
+	return m
 
 
-func _make_pause() -> PanelContainer:
-	var p := _modal("Paused")
-	var v: VBoxContainer = p.get_node("V")
-	v.add_child(_btn("Resume", _toggle_pause))
-	v.add_child(_btn("New Game", func(): _toggle_pause(); _new_game()))
-	v.add_child(_btn("Settings", _open_settings))
-	v.add_child(_btn("Resign", func(): _toggle_pause(); controller.resign()))
-	v.add_child(_btn("Main menu", _to_menu))
-	p.visible = false
-	return p
+func _make_paste() -> Modal:
+	var m := Modal.new("Load a position", 560)
+	m.set_subtitle("Paste a PDN FEN (e.g. W:W21,22:B1,K12) or a full PDN game.")
+	_paste_edit = TextEdit.new()
+	_paste_edit.custom_minimum_size = Vector2(0, 200)
+	_paste_edit.placeholder_text = "B:W21,22,23,24,25,26,27,28,29,30,31,32:B1,2,3,4,5,6,7,8,9,10,11,12"
+	_paste_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	m.body.add_child(_paste_edit)
+	m.add_footer_button(UIKit.button("Paste from clipboard", func(): _paste_edit.text = DisplayServer.clipboard_get(), "GhostButton", "copy"))
+	m.add_footer_button(UIKit.button("Load", func():
+		var text := _paste_edit.text.strip_edges()
+		var ok := controller.load_pdn(text) if (text.contains("[") or text.contains("1.")) else controller.load_fen(text)
+		if ok:
+			m.close()
+			_toasts.show_toast("Position loaded", "success")
+	, "PrimaryButton", "upload"))
+	return m
 
 
-func _make_end() -> PanelContainer:
-	var p := _modal("Game over")
-	var v: VBoxContainer = p.get_node("V")
-	var msg := Label.new()
-	msg.name = "Msg"
-	msg.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	msg.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	v.add_child(msg)
-	v.add_child(_btn("New game", func(): p.visible = false; _new_game()))
-	v.add_child(_btn("Save", func(): controller.save_now()))
-	v.add_child(_btn("Main menu", _to_menu))
-	p.visible = false
-	return p
+# --- Refresh ----------------------------------------------------------------------
 
-
-func _modal(title: String) -> PanelContainer:
-	var p := PanelContainer.new()
-	p.set_anchors_preset(Control.PRESET_CENTER)
-	p.custom_minimum_size = Vector2(380, 80)
-	p.offset_left = -210
-	p.offset_right = 210
-	p.offset_top = -150
-	p.offset_bottom = 150
-	var v := VBoxContainer.new()
-	v.name = "V"
-	v.add_theme_constant_override("separation", 12)
-	var t := Label.new()
-	t.text = title
-	t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	var df: FontFile = load("res://assets/fonts/InterDisplay-SemiBold.ttf")
-	if df:
-		t.add_theme_font_override("font", df)
-	t.add_theme_font_size_override("font_size", 22)
-	v.add_child(t)
-	p.add_child(v)
-	return p
-
-
-func _btn(text: String, cb: Callable) -> Button:
-	var b := Button.new()
-	b.text = text
-	b.pressed.connect(func():
-		AudioManager.play("ui")
-		cb.call()
-	)
-	return b
-
-
-func _heading(text: String) -> Label:
-	var l := Label.new()
-	l.text = text.to_upper()
-	l.add_theme_font_size_override("font_size", 12)
-	l.add_theme_color_override("font_color", ThemeFactory.accent())
-	return l
-
-
-func _clock_label(text: String) -> Label:
-	var l := Label.new()
-	l.text = text
-	l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	l.add_theme_font_size_override("font_size", 22)
-	return l
+func _process(delta: float) -> void:
+	if controller == null:
+		return
+	var bottom := controller.bottom_side()
+	var top := CheckersTypes.opp(bottom)
+	_card_top.set_clock(controller.clocks[top], controller.clock_enabled)
+	_card_bottom.set_clock(controller.clocks[bottom], controller.clock_enabled)
+	if controller.is_thinking() or controller.is_puzzle_busy():
+		_pill_dots += delta * 2.5
+		_pill_label.text = controller.status_text() + ".".repeat(int(_pill_dots) % 4)
 
 
 func _refresh() -> void:
-	if controller == null:
+	if controller == null or _card_top == null:
 		return
+	var pos := controller.view_position()
+	var bottom := controller.bottom_side()
+	var top := CheckersTypes.opp(bottom)
+	_mode_label.text = "%s  ·  %s" % [GameSession.mode_label(), GameSession.time_control_label()]
+	_setup_card(_card_top, top, pos)
+	_setup_card(_card_bottom, bottom, pos)
+
+	var status := controller.status_text()
+	_pill_label.text = status
+	var col := ThemeFactory.CREAM
+	var icon := "clock"
+	if controller.engine.game_over() and controller.is_live():
+		col = ThemeFactory.GOLD_BRIGHT
+		icon = "trophy"
+	elif not controller.is_live():
+		col = ThemeFactory.INFO
+		icon = "eye"
+	elif controller.must_capture_now() and controller.can_interact():
+		col = ThemeFactory.GOLD_BRIGHT
+		icon = "info"
+	elif controller.is_thinking():
+		icon = "moon"
+		col = ThemeFactory.GOLD
+	_pill_label.add_theme_color_override("font_color", col)
+	_pill_icon.texture = IconLibrary.get_icon(icon, 16, col)
+
 	var e := controller.engine
-	_status.text = controller.turn_status()
-	_paint_turn_chip()
-	_paint_clocks()
-	_history.text = _history_bb(e)
-	_cap_w.text = "White took  " + _captured(e, CheckersTypes.BLACK)
-	_cap_b.text = "Black took  " + _captured(e, CheckersTypes.WHITE)
-	_fen_box.text = e.to_fen()
-	_thinking.visible = controller.is_ai_thinking()
-	_diff.text = _player_line()
-	controller.paused = _pause.visible
-	if not e.game_over():
-		_end.visible = false
+	var sans := PackedStringArray()
+	for m in e.history:
+		sans.append(m.notation)
+	var first_left := e.start_side == CheckersRules.first_to_move(e.variant)
+	_moves.set_moves(sans, first_left, maxi(e.start_fullmove, 1))
+	_moves.set_current(controller.view_ply)
+	var live := controller.is_live()
+	_nav[0].disabled = controller.view_ply == 0
+	_nav[1].disabled = controller.view_ply == 0
+	_nav[2].disabled = live
+	_nav[3].disabled = live
+	_live_btn.visible = not live
+
+	_act_undo.disabled = not controller.can_undo()
+	_act_redo.disabled = not controller.can_redo()
+	_act_hint.disabled = not controller.can_interact()
+	_act_draw.disabled = e.game_over() or e.history.size() < 2
+	_act_resign.disabled = e.game_over() or e.history.size() < 1
+
+	var wants_eval := controller.eval_wanted()
+	var eval_wrap := root.get_node("EvalWrap") as Control
+	if eval_wrap.visible != wants_eval:
+		eval_wrap.visible = wants_eval
+		_update_insets()
+	_eval_bar.white_bottom = bottom == CheckersTypes.WHITE
+	_eval_bar.queue_redraw()
+	_pv.visible = wants_eval and str(controller.last_eval.get("pv", "")) != "" and GameSession.mode != GameSession.Mode.PUZZLE
+
+	if GameSession.mode == GameSession.Mode.PUZZLE:
+		var info := controller.puzzle_info()
+		_puzzle_title.text = info["title"]
+		var solver := controller.side_label(CheckersTypes.opp(GameSession.ai_side))
+		_puzzle_goal.text = "%s to play and win" % solver if info["goal"] == "win" else "%s to play and gain %s" % [solver, str(info["gain"])]
+		var stars := "★".repeat(int(info["difficulty"])) + "☆".repeat(maxi(0, 5 - int(info["difficulty"])))
+		_puzzle_meta.text = "%s  ·  %s  ·  solved %d" % [str(info["theme"]).capitalize(), stars, ProfileStore.puzzles_solved.size()]
+		_puzzle_next.disabled = false
 
 
-func _player_line() -> String:
-	if GameSession.mode == GameSession.Mode.AI:
-		var you := "Black" if GameSession.ai_side == CheckersTypes.WHITE else "White"
-		return "You are %s   ·   Shadow  %s" % [you, SettingsStore.ai_difficulty.capitalize()]
-	return "%s vs %s" % [GameSession.white_name, GameSession.black_name]
+func _setup_card(card: PlayerCard, side: int, pos: CheckersEngine) -> void:
+	var ai := controller.is_ai_side(side)
+	var sub := controller.side_label(side)
+	if ai:
+		sub = "%s  ·  %s" % [controller.side_label(side), _level_name(GameSession.ai_level)]
+	elif GameSession.mode == GameSession.Mode.AI:
+		sub = "%s  ·  rating %s" % [controller.side_label(side), ProfileStore.rating_label()]
+	card.setup(side, controller.side_name(side), sub, ai)
+	var live_turn := not controller.engine.game_over() and pos.side_to_move == side
+	card.set_active(live_turn)
+	card.set_thinking(ai and controller.is_thinking())
+	var diff := pos.piece_count(side) - pos.piece_count(CheckersTypes.opp(side))
+	card.set_captured(controller.captured_by(side), diff)
 
 
-func _paint_turn_chip() -> void:
-	if controller.engine.game_over():
-		_turn_chip.text = "Finished"
-		_turn_chip.add_theme_color_override("font_color", ThemeFactory.gold())
+func _on_eval(white_cp: int, mate_white: int, depth: int, pv: String) -> void:
+	_eval_bar.set_eval(white_cp, mate_white)
+	_eval_caption.text = "d%d" % depth if depth > 0 else ""
+	_pv.text = "Shadow's line:  " + pv if pv != "" else ""
+	_pv.visible = pv != "" and controller.eval_wanted()
+
+
+func _on_game_finished(info: Dictionary) -> void:
+	if GameSession.mode == GameSession.Mode.PUZZLE:
 		return
-	if controller.is_ai_thinking():
-		_turn_chip.text = "Thinking"
-		_turn_chip.add_theme_color_override("font_color", ThemeFactory.accent())
+	await get_tree().create_timer(1.1).timeout
+	if is_instance_valid(_end) and controller.engine.game_over():
+		_end.present(info, GameSession.mode == GameSession.Mode.AI)
+
+
+func _on_puzzle_event(kind: String, text: String) -> void:
+	_puzzle_feedback.text = text
+	var c := ThemeFactory.MUTED
+	match kind:
+		"solved":
+			c = ThemeFactory.SUCCESS
+			_toasts.show_toast(text, "success", 3.0)
+		"wrong":
+			c = ThemeFactory.DANGER
+		"correct":
+			c = ThemeFactory.GOLD
+	_puzzle_feedback.add_theme_color_override("font_color", c)
+	_refresh()
+
+
+func _update_insets() -> void:
+	var left := 72.0 if root.get_node("EvalWrap").visible else 20.0
+	controller.camera_rig.set_insets(left, PANEL_W + MARGIN * 2, 56.0, 12.0)
+	# Centre the status pill over the free area rather than the whole window.
+	_pill.offset_left = -(PANEL_W + MARGIN * 2) * 0.5 + (left - 20.0) * 0.5
+	_pill.offset_right = _pill.offset_left
+
+
+func _fade_hint() -> void:
+	if _hint_label.modulate.a < 0.99:
 		return
-	var side := controller.engine.side_to_move
-	_turn_chip.text = "%s to move" % CheckersTypes.side_name(side)
-	if side == CheckersTypes.BLACK:
-		_turn_chip.add_theme_color_override("font_color", Color(0.78, 0.86, 0.94))
-	else:
-		_turn_chip.add_theme_color_override("font_color", Color(0.96, 0.88, 0.70))
+	var tw := create_tween()
+	tw.tween_interval(4.0)
+	tw.tween_property(_hint_label, "modulate:a", 0.0, 1.2)
 
 
-func _paint_clocks() -> void:
-	if not controller.clock_enabled:
-		_clock_w.text = "White  ∞"
-		_clock_b.text = "Black  ∞"
-	else:
-		_clock_w.text = "White  %s" % _fmt(controller.white_clock)
-		_clock_b.text = "Black  %s" % _fmt(controller.black_clock)
-	var side := controller.engine.side_to_move
-	_clock_w.add_theme_color_override("font_color", ThemeFactory.gold() if side == CheckersTypes.WHITE and not controller.engine.game_over() else Color(0.84, 0.90, 0.94))
-	_clock_b.add_theme_color_override("font_color", ThemeFactory.gold() if side == CheckersTypes.BLACK and not controller.engine.game_over() else Color(0.84, 0.90, 0.94))
-
-
-func _history_bb(e: CheckersEngine) -> String:
-	var groups: Array = e.turn_groups()
-	if groups.is_empty():
-		return "[color=#7f8c96]No moves yet[/color]"
-	var parts: PackedStringArray = PackedStringArray()
-	for i in groups.size():
-		parts.append("[color=#6ad4e8]%d.[/color]" % (i + 1))
-		var hops: Array = groups[i]
-		if hops.size() == 1 and not hops[0].is_capture():
-			parts.append("%s-%s" % [CheckersTypes.algebraic(hops[0].from_sq), CheckersTypes.algebraic(hops[0].to_sq)])
-		else:
-			var bits: PackedStringArray = PackedStringArray()
-			bits.append(CheckersTypes.algebraic(hops[0].from_sq))
-			for h in hops:
-				bits.append(CheckersTypes.algebraic(h.to_sq))
-			parts.append("x".join(bits))
-	return " ".join(parts)
-
-
-func _captured(e: CheckersEngine, color: int) -> String:
-	var men := 0
-	var kings := 0
-	for sq in 64:
-		var p := e.piece_at(sq)
-		if p != 0 and CheckersTypes.pcolor(p) == color:
-			if CheckersTypes.ptype(p) == CheckersTypes.KING:
-				kings += 1
-			else:
-				men += 1
-	var missing := 12 - men - kings
-	if missing <= 0:
-		return "—"
-	var s := ""
-	for i in missing:
-		s += "●"
-	return "%s  (%d)" % [s, missing]
-
-
-func _fmt(t: float) -> String:
-	var s := int(ceil(t))
-	return "%d:%02d" % [int(s / 60.0), s % 60]
-
+# --- Actions --------------------------------------------------------------------------
 
 func _toggle_pause() -> void:
-	_pause.visible = not _pause.visible
-	controller.paused = _pause.visible
 	if _pause.visible:
-		_end.visible = false
-
-
-func _show_end(text: String) -> void:
-	_end.visible = true
-	var msg := _end.get_node("V/Msg") as Label
-	if msg:
-		msg.text = text
-	_status.text = text
-	_paint_turn_chip()
-
-
-func _new_game() -> void:
-	_end.visible = false
-	_pause.visible = false
-	controller.paused = false
-	controller.restart()
-
-
-func _load_fen() -> void:
-	controller._cancel_ai()
-	if controller.engine.from_fen(_fen_box.text.strip_edges()):
-		controller.last_from = -1
-		controller.last_to = -1
-		controller.rebuild_pieces()
-		controller._deselect()
-		controller.state_changed.emit()
-		controller._maybe_ai()
-
-
-func _toast_save(path: String) -> void:
-	_status.text = "Saved  " + path.get_file() if path != "" else "Save failed"
+		_pause.close()
+	else:
+		controller.set_paused(true)
+		AudioManager.duck_music(true)
+		_pause.open()
 
 
 func _open_settings() -> void:
-	get_tree().change_scene_to_file("res://scenes/menus/settings_menu.tscn")
+	var s := SettingsPanel.new()
+	root.add_child(s)
+	s.closed.connect(s.queue_free)
+	s.open()
 
 
-func _to_menu() -> void:
-	controller._cancel_ai()
+func _offer_draw() -> void:
+	var text := "Offer Shadow a draw? Shadow accepts only when it sees no winning chances." if GameSession.mode == GameSession.Mode.AI else "Agree to a draw and end the game?"
+	var d := ConfirmDialog.new("Offer a draw", text, "Offer draw", func(): controller.offer_draw())
+	root.add_child(d)
+	d.open()
+
+
+func _resign() -> void:
+	var d := ConfirmDialog.new("Resign", "Resign this game? It counts as a loss.", "Resign", func(): controller.resign(), true)
+	root.add_child(d)
+	d.open()
+
+
+func _next_puzzle() -> void:
+	var all := CheckersPuzzles.load_all()
+	if all.is_empty():
+		return
+	var idx := (GameSession.puzzle_index + 1) % all.size()
+	for i in all.size():
+		var cand := (GameSession.puzzle_index + 1 + i) % all.size()
+		if not ProfileStore.is_puzzle_solved(str(all[cand].get("id", ""))):
+			idx = cand
+			break
+	GameSession.configure_puzzle(all[idx], idx)
+	get_tree().reload_current_scene()
+
+
+func _export_pdn_file() -> void:
+	if _file_dialog == null:
+		_file_dialog = FileDialog.new()
+		_file_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
+		_file_dialog.access = FileDialog.ACCESS_FILESYSTEM
+		_file_dialog.use_native_dialog = true
+		_file_dialog.filters = PackedStringArray(["*.pdn ; PDN draughts game"])
+		_file_dialog.title = "Save PDN"
+		_file_dialog.file_selected.connect(func(path: String):
+			var f := FileAccess.open(path, FileAccess.WRITE)
+			if f:
+				f.store_string(controller.export_pdn())
+				f.close()
+				_toasts.show_toast("Saved %s" % path.get_file(), "success")
+			else:
+				_toasts.show_toast("Could not write %s" % path, "error")
+		)
+		add_child(_file_dialog)
+	var docs := OS.get_system_dir(OS.SYSTEM_DIR_DOCUMENTS)
+	_file_dialog.current_dir = docs if docs != "" else OS.get_environment("HOME")
+	_file_dialog.current_file = "shadow-checkers-%s.pdn" % Time.get_date_string_from_system()
+	_file_dialog.popup_centered_ratio(0.6)
+
+
+func _to_menu(screen: String = "") -> void:
+	GameSession.set_meta("menu_screen", screen)
 	get_tree().change_scene_to_file("res://scenes/menus/main_menu.tscn")
 
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("pause_game"):
-		_toggle_pause()
+		if controller.prefix.size() > 1 and not _pause.visible:
+			controller._reset_partial(true)
+		else:
+			_toggle_pause()
+		get_viewport().set_input_as_handled()
+	elif event.is_action_pressed("show_help"):
+		_help.open()
+		get_viewport().set_input_as_handled()
+	elif event.is_action_pressed("toggle_fullscreen"):
+		SettingsStore.window_mode = "windowed" if SettingsStore.window_mode != "windowed" else "borderless"
+		SettingsStore.apply_display()
+		SettingsStore.save_settings()
+		get_viewport().set_input_as_handled()
+
+
+# --- Helpers ----------------------------------------------------------------------------
+
+func _level_name(id: String) -> String:
+	for l in CheckersAI.levels():
+		if str(l.get("id")) == id:
+			return str(l.get("name"))
+	return id.capitalize()

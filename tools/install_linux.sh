@@ -1,71 +1,76 @@
 #!/usr/bin/env bash
+# Installs Shadow Checkers for the current user:
+#   ~/.local/bin/shadow-checkers                (the exported release binary)
+#   ~/.local/share/applications/shadow-checkers.desktop
+#   ~/.local/share/icons/hicolor/*/apps/shadow-checkers.{png,svg}
+# Saves and settings (XDG dirs) are never touched.  --uninstall removes the
+# binary, launcher, and icons.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOME_DIR="${HOME}"
-ICON_SRC="$ROOT/icon.svg"
-if [[ ! -f "$ICON_SRC" ]]; then
-	ICON_SRC="$ROOT/assets/icons/shadow-checkers.svg"
+BIN_SRC="$ROOT/export/linux/shadow-checkers.x86_64"
+BINDIR="${HOME}/.local/bin"
+PREFIX="${XDG_DATA_HOME:-$HOME/.local/share}"
+ICON_NAME="shadow-checkers"
+VERSION="$(sed -n 's/^config\/version="\(.*\)"/\1/p' "$ROOT/project.godot")"
+
+if [[ "${1:-}" == "--uninstall" ]]; then
+	rm -f "$BINDIR/shadow-checkers"
+	rm -f "$PREFIX/applications/shadow-checkers.desktop"
+	for size in 16 22 24 32 48 64 128 256 512; do
+		rm -f "$PREFIX/icons/hicolor/${size}x${size}/apps/${ICON_NAME}.png"
+	done
+	rm -f "$PREFIX/icons/hicolor/scalable/apps/${ICON_NAME}.svg"
+	echo "Removed Shadow Checkers. Saves in $PREFIX/shadow-checkers were kept."
+	exit 0
 fi
-HICOLOR="$HOME_DIR/.local/share/icons/hicolor"
-APP_DIR="$HOME_DIR/.local/share/applications"
-BIN_DIR="$HOME_DIR/.local/bin"
-SIZES=(16 22 24 32 48 64 128 256 512)
 
-mkdir -p "$HICOLOR/scalable/apps" "$APP_DIR" "$BIN_DIR" "$ROOT/assets/icons/hicolor/scalable/apps"
+if [[ ! -x "$BIN_SRC" ]]; then
+	echo "Exporting Linux release…"
+	"$ROOT/tools/export_linux.sh"
+fi
 
-cp "$ICON_SRC" "$HICOLOR/scalable/apps/shadow-checkers.svg"
-cp "$ICON_SRC" "$ROOT/assets/icons/shadow-checkers.svg"
-cp "$ICON_SRC" "$ROOT/assets/icons/hicolor/scalable/apps/shadow-checkers.svg"
+mkdir -p "$BINDIR" "$PREFIX/applications"
+# Replace any older launcher script or binary atomically.
+install -m 0755 "$BIN_SRC" "$BINDIR/.shadow-checkers.new"
+mv -f "$BINDIR/.shadow-checkers.new" "$BINDIR/shadow-checkers"
 
-for sz in "${SIZES[@]}"; do
-	mkdir -p "$HICOLOR/${sz}x${sz}/apps" "$ROOT/assets/icons/hicolor/${sz}x${sz}/apps"
-	rsvg-convert -w "$sz" -h "$sz" "$ICON_SRC" -o "$HICOLOR/${sz}x${sz}/apps/shadow-checkers.png"
-	cp "$HICOLOR/${sz}x${sz}/apps/shadow-checkers.png" "$ROOT/assets/icons/hicolor/${sz}x${sz}/apps/shadow-checkers.png"
+for size in 16 22 24 32 48 64 128 256 512; do
+	src="$ROOT/assets/icons/hicolor/${size}x${size}/apps/${ICON_NAME}.png"
+	if [[ -f "$src" ]]; then
+		mkdir -p "$PREFIX/icons/hicolor/${size}x${size}/apps"
+		install -m 0644 "$src" "$PREFIX/icons/hicolor/${size}x${size}/apps/${ICON_NAME}.png"
+	fi
 done
-cp "$HICOLOR/512x512/apps/shadow-checkers.png" "$ROOT/assets/icons/shadow-checkers.png"
+mkdir -p "$PREFIX/icons/hicolor/scalable/apps"
+install -m 0644 "$ROOT/icon.svg" "$PREFIX/icons/hicolor/scalable/apps/${ICON_NAME}.svg"
 
-cat > "$BIN_DIR/shadow-checkers" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-ROOT="\${SHADOW_CHECKERS_ROOT:-$ROOT}"
-BIN="\$ROOT/export/linux/shadow-checkers.x86_64"
-GODOT="\${GODOT:-\$HOME/.local/bin/godot}"
-if [[ -x "\$BIN" ]]; then
-	exec "\$BIN" "\$@"
-fi
-if [[ -x "\$GODOT" ]]; then
-	exec "\$GODOT" --path "\$ROOT" "\$@"
-fi
-echo "Shadow Checkers: no exported binary or Godot editor found." >&2
-exit 1
-EOF
-chmod +x "$BIN_DIR/shadow-checkers"
-
-cat > "$APP_DIR/shadow-checkers.desktop" <<EOF
+cat > "$PREFIX/applications/shadow-checkers.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Version=1.0
 Name=Shadow Checkers
-GenericName=Checkers
-Comment=Premium 3D English/American checkers for Linux
-Exec=$BIN_DIR/shadow-checkers
-TryExec=$BIN_DIR/shadow-checkers
-Icon=shadow-checkers
+GenericName=Draughts
+Comment=3D checkers for Linux — English, Russian, and Brazilian rules
+Exec=${BINDIR}/shadow-checkers
+TryExec=${BINDIR}/shadow-checkers
+Icon=${ICON_NAME}
 Terminal=false
 Categories=Game;BoardGame;
-Keywords=checkers;draughts;board;3d;shadow;
+Keywords=checkers;draughts;shashki;board;3d;shadowfetch;
 StartupNotify=true
 StartupWMClass=Shadow Checkers
-EOF
-cp "$APP_DIR/shadow-checkers.desktop" "$ROOT/packaging/shadow-checkers.desktop"
+X-AppVersion=${VERSION}
+DESKTOP
+sed -e "s#^Exec=.*#Exec=shadow-checkers#" -e "s#^TryExec=.*#TryExec=shadow-checkers#" \
+	"$PREFIX/applications/shadow-checkers.desktop" > "$ROOT/packaging/shadow-checkers.desktop"
 
-desktop-file-validate "$APP_DIR/shadow-checkers.desktop"
-update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
-if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-	gtk-update-icon-cache -f "$HICOLOR" >/dev/null 2>&1 || true
+if command -v desktop-file-validate >/dev/null; then
+	desktop-file-validate "$PREFIX/applications/shadow-checkers.desktop" || true
 fi
-
-echo "Installed Shadow Checkers launcher:"
-echo "  $BIN_DIR/shadow-checkers"
-echo "  $APP_DIR/shadow-checkers.desktop"
-echo "  $HICOLOR/scalable/apps/shadow-checkers.svg"
+update-desktop-database "$PREFIX/applications" >/dev/null 2>&1 || true
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+	gtk-update-icon-cache -f -t "$PREFIX/icons/hicolor" >/dev/null 2>&1 || true
+fi
+echo "Installed Shadow Checkers ${VERSION}"
+echo "  binary:   $BINDIR/shadow-checkers"
+echo "  launcher: $PREFIX/applications/shadow-checkers.desktop"

@@ -1,204 +1,221 @@
 class_name BoardView
 extends Node3D
 
-signal square_clicked(sq: int)
+## The draughtboard: base slab, 64 tiles, frame, coordinates, optional
+## 1–32 square numbers, capture trays, and pooled highlight marks. Geometry
+## comes from res://assets/models when present, otherwise primitives.
+## The frame rests on the table at y = 0; tile tops are at TOP_Y.
 
-var highlights: Array[MeshInstance3D] = []
-var dots: Array[MeshInstance3D] = []
+const LIFT := 0.12
+const TILE_H := 0.07
+const TOP_Y := LIFT + TILE_H
+const MODEL_DIR := "res://assets/models/"
+const TRAY_X := 5.35
+
+var _fill: Array[MeshInstance3D] = []
+var _marker: Array[MeshInstance3D] = []
 var _hover: MeshInstance3D
-var _light_base: Color = Color(0.84, 0.72, 0.54)
-var _dark_base: Color = Color(0.20, 0.13, 0.09)
-var _select_mat: StandardMaterial3D
-var _legal_mat: StandardMaterial3D
-var _capture_mat: StandardMaterial3D
-var _last_mat: StandardMaterial3D
-var _continue_mat: StandardMaterial3D
-var _movable_mat: StandardMaterial3D
-var _hover_mat: StandardMaterial3D
-var _dot_legal: StandardMaterial3D
-var _dot_capture: StandardMaterial3D
+var _arrows: Node3D
+var _coords: Array[Label3D] = []
+var _numbers: Array[Label3D] = []
+var _hover_sq := -1
+var _white_bottom := true
 
 
 func _ready() -> void:
-	_build_materials()
-	_build_table()
+	MaterialLibrary.ensure()
+	_build_base()
+	_build_tiles()
 	_build_frame()
-	_build_squares()
+	_build_trays()
 	_build_coords()
-	_build_highlights()
-	_build_dots()
-	_build_hover()
+	_build_numbers()
+	_build_marks()
+	apply_settings()
 
 
 func square_to_world(sq: int) -> Vector3:
-	var f := CheckersTypes.file_of(sq)
-	var r := CheckersTypes.rank_of(sq)
-	return Vector3(f - 3.5, 0.198, 3.5 - r)
+	return Vector3(CheckersTypes.file_of(sq) - 3.5, TOP_Y, 3.5 - CheckersTypes.rank_of(sq))
 
 
-func world_to_square(pos: Vector3) -> int:
-	var f := int(floor(pos.x + 4.0))
-	var r := int(floor(4.0 - pos.z))
-	if CheckersTypes.in_board(f, r):
-		return CheckersTypes.sq(f, r)
-	return -1
+## Slot for the index-th disc captured BY `capturer`, stacked flat in rows on
+## the capturer's right-hand side of the board.
+func tray_slot(capturer: int, index: int) -> Vector3:
+	var col := index % 2
+	var row := int(index / 2.0)
+	var side := 1.0 if capturer == CheckersTypes.WHITE else -1.0
+	var x := side * (TRAY_X - 0.3 + col * 0.6)
+	var z := side * (3.35 - row * 0.64)
+	return Vector3(x, 0.035, z)
 
+
+func set_white_bottom(white_bottom: bool) -> void:
+	_white_bottom = white_bottom
+	var rot := 0.0 if white_bottom else 180.0
+	for l in _coords:
+		l.rotation_degrees = Vector3(-90, rot, 0)
+	for l in _numbers:
+		l.rotation_degrees = Vector3(-90, rot, 0)
+	_place_numbers()
+
+
+func apply_settings() -> void:
+	var c := MaterialLibrary.coord_color()
+	for l in _coords:
+		l.visible = SettingsStore.show_coordinates
+		l.modulate = Color(c.r, c.g, c.b, 0.9)
+	for l in _numbers:
+		l.visible = SettingsStore.show_square_numbers
+		l.modulate = Color(c.r, c.g, c.b, 0.55)
+
+
+# --- Marks ----------------------------------------------------------------------------
 
 func clear_highlights() -> void:
-	for h in highlights:
-		h.visible = false
-	for d in dots:
-		d.visible = false
-	if _hover:
-		_hover.visible = false
+	for i in 64:
+		_fill[i].visible = false
+		_marker[i].visible = false
 
 
 func show_highlight(sq: int, kind: String) -> void:
 	if sq < 0 or sq > 63:
 		return
 	match kind:
-		"legal":
-			_show_dot(sq, _dot_legal, 0.11)
-		"capture":
-			_show_dot(sq, _dot_capture, 0.14)
 		"select":
-			_show_plane(sq, _select_mat)
-		"continue":
-			_show_plane(sq, _continue_mat)
+			_show_fill(sq, MaterialLibrary.mark_select)
+		"last":
+			if SettingsStore.highlight_last_move:
+				_show_fill(sq, MaterialLibrary.mark_last)
+		"legal":
+			_show_marker(sq, MaterialLibrary.mark_legal, 0.44)
+		"capture":
+			_show_marker(sq, MaterialLibrary.mark_capture, 0.98)
 		"movable":
-			_show_plane(sq, _movable_mat)
-		_:
-			_show_plane(sq, _last_mat)
+			_show_marker(sq, MaterialLibrary.mark_movable, 1.0)
+		"path":
+			if SettingsStore.highlight_last_move:
+				_show_marker(sq, MaterialLibrary.mark_path, 0.22)
+		"route":
+			_show_marker(sq, MaterialLibrary.mark_path, 0.26)
 
 
 func show_hover(sq: int) -> void:
-	if sq < 0 or sq > 63 or _hover == null:
+	if sq == _hover_sq:
 		return
-	var f := CheckersTypes.file_of(sq)
-	var r := CheckersTypes.rank_of(sq)
-	_hover.position = Vector3(f - 3.5, 0.208, 3.5 - r)
+	_hover_sq = sq
+	if sq < 0:
+		_hover.visible = false
+		return
+	var p := square_to_world(sq)
+	_hover.position = Vector3(p.x, TOP_Y + 0.006, p.z)
 	_hover.visible = true
 
 
-func _show_plane(sq: int, mat: Material) -> void:
-	var h := highlights[sq]
-	h.visible = true
-	h.material_override = mat
+func _show_fill(sq: int, mat: Material) -> void:
+	_fill[sq].material_override = mat
+	_fill[sq].visible = true
 
 
-func _show_dot(sq: int, mat: Material, radius: float) -> void:
-	var d := dots[sq]
-	d.visible = true
-	d.material_override = mat
-	if d.mesh is CylinderMesh:
-		var mesh := d.mesh as CylinderMesh
-		mesh.top_radius = radius
-		mesh.bottom_radius = radius
+func _show_marker(sq: int, mat: Material, s: float) -> void:
+	var m := _marker[sq]
+	m.material_override = mat
+	m.scale = Vector3(s, 1, s)
+	m.visible = true
 
 
-func _build_materials() -> void:
-	_select_mat = _emit(Color(0.38, 0.90, 1.0, 0.58), 1.05)
-	_legal_mat = _emit(Color(0.32, 0.72, 0.86, 0.28), 0.55)
-	_capture_mat = _emit(Color(0.94, 0.34, 0.28, 0.48), 0.85)
-	_continue_mat = _emit(Color(0.98, 0.76, 0.28, 0.55), 0.95)
-	_last_mat = _emit(Color(0.96, 0.78, 0.32, 0.30), 0.45)
-	_movable_mat = _emit(Color(0.40, 0.82, 0.78, 0.22), 0.35)
-	_hover_mat = _emit(Color(0.95, 0.97, 1.0, 0.22), 0.4)
-	_dot_legal = _emit(Color(0.42, 0.88, 0.82, 0.92), 0.9)
-	_dot_capture = _emit(Color(0.95, 0.32, 0.28, 0.95), 1.1)
-
-
-func _emit(c: Color, energy: float) -> StandardMaterial3D:
-	var m := StandardMaterial3D.new()
-	m.albedo_color = c
-	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	m.emission_enabled = true
-	m.emission = Color(c.r, c.g, c.b)
-	m.emission_energy_multiplier = energy
-	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	m.disable_receive_shadows = true
-	return m
-
-
-func _wood(color: Color, rough: float) -> StandardMaterial3D:
-	var m := StandardMaterial3D.new()
-	m.albedo_color = color
-	m.roughness = rough
-	m.metallic = 0.04
-	return m
-
-
-func _build_table() -> void:
+## Flat arrow through every landing square of a (multi-jump) path.
+func show_path_arrow(path: PackedInt32Array, mat: Material = null) -> void:
+	clear_arrows()
+	if path.size() < 2:
+		return
+	var pts: Array[Vector3] = []
+	for s in path:
+		pts.append(square_to_world(s))
 	var mi := MeshInstance3D.new()
-	var mesh := BoxMesh.new()
-	mesh.size = Vector3(20, 0.14, 20)
+	mi.mesh = _arrow_mesh(pts, 0.16, 0.46, 0.42)
+	mi.material_override = mat if mat else MaterialLibrary.mark_hint
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mi.position.y = 0.012
+	_arrows.add_child(mi)
+	if not SettingsStore.reduce_motion:
+		mi.transparency = 1.0
+		create_tween().tween_property(mi, "transparency", 0.0, 0.25)
+
+
+func clear_arrows() -> void:
+	for c in _arrows.get_children():
+		c.queue_free()
+
+
+func _arrow_mesh(pts: Array[Vector3], shaft_w: float, head_w: float, head_len: float) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	st.set_normal(Vector3.UP)
+	var n := pts.size()
+	for i in n - 1:
+		var p0 := pts[i]
+		var p1 := pts[i + 1]
+		var dir := (p1 - p0).normalized()
+		if i == 0:
+			p0 += dir * 0.3
+		if i == n - 2:
+			p1 -= dir * head_len
+		else:
+			p1 += dir * shaft_w * 0.5
+		var side := dir.cross(Vector3.UP).normalized() * shaft_w * 0.5
+		for v in [p0 - side, p0 + side, p1 + side, p0 - side, p1 + side, p1 - side]:
+			st.add_vertex(Vector3(v.x, TOP_Y, v.z))
+	var tip := pts[n - 1]
+	var d := (tip - pts[n - 2]).normalized()
+	var base := tip - d * head_len
+	var hs := d.cross(Vector3.UP).normalized() * head_w * 0.5
+	st.add_vertex(Vector3(base.x - hs.x, TOP_Y, base.z - hs.z))
+	st.add_vertex(Vector3(tip.x - d.x * 0.12, TOP_Y, tip.z - d.z * 0.12))
+	st.add_vertex(Vector3(base.x + hs.x, TOP_Y, base.z + hs.z))
+	return st.commit()
+
+
+# --- Construction ------------------------------------------------------------------------
+
+func _model(name: String) -> Mesh:
+	var p := MODEL_DIR + name + ".obj"
+	return load(p) as Mesh if ResourceLoader.exists(p) else null
+
+
+func _build_base() -> void:
+	var mi := MeshInstance3D.new()
+	var mesh := _model("board_base")
+	if mesh == null:
+		var box := BoxMesh.new()
+		box.size = Vector3(8.02, 0.1, 8.02)
+		mesh = box
+		mi.position.y = LIFT - 0.05
+	else:
+		mi.position.y = LIFT
 	mi.mesh = mesh
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.045, 0.05, 0.062)
-	mat.roughness = 0.92
-	mi.material_override = mat
-	mi.position.y = -0.16
+	mi.material_override = MaterialLibrary.base_mat
 	add_child(mi)
-	var cloth := MeshInstance3D.new()
-	var cm := BoxMesh.new()
-	cm.size = Vector3(13.2, 0.04, 13.2)
-	cloth.mesh = cm
-	var felt := StandardMaterial3D.new()
-	felt.albedo_color = Color(0.07, 0.12, 0.14)
-	felt.roughness = 0.88
-	cloth.material_override = felt
-	cloth.position.y = -0.07
-	add_child(cloth)
 
 
-func _build_frame() -> void:
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.16, 0.10, 0.07)
-	mat.metallic = 0.18
-	mat.roughness = 0.42
-	var frame := MeshInstance3D.new()
-	var box := BoxMesh.new()
-	box.size = Vector3(8.95, 0.26, 8.95)
-	frame.mesh = box
-	frame.material_override = mat
-	frame.position.y = 0.04
-	add_child(frame)
-	var inlay := MeshInstance3D.new()
-	var ib := BoxMesh.new()
-	ib.size = Vector3(8.55, 0.06, 8.55)
-	inlay.mesh = ib
-	var metal := StandardMaterial3D.new()
-	metal.albedo_color = Color(0.55, 0.72, 0.78)
-	metal.metallic = 0.72
-	metal.roughness = 0.28
-	inlay.material_override = metal
-	inlay.position.y = 0.155
-	add_child(inlay)
-	var inner := MeshInstance3D.new()
-	var felt_box := BoxMesh.new()
-	felt_box.size = Vector3(8.08, 0.05, 8.08)
-	inner.mesh = felt_box
-	var felt := StandardMaterial3D.new()
-	felt.albedo_color = Color(0.08, 0.11, 0.13)
-	inner.material_override = felt
-	inner.position.y = 0.13
-	add_child(inner)
-
-
-func _build_squares() -> void:
+func _build_tiles() -> void:
+	var tile := _model("square_tile")
+	var authored := tile != null
+	if not authored:
+		var box := BoxMesh.new()
+		box.size = Vector3(0.985, TILE_H, 0.985)
+		tile = box
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 32
 	for r in 8:
 		for f in 8:
 			var sq := CheckersTypes.sq(f, r)
-			var dark := CheckersTypes.is_dark_fr(f, r)
-			var shade := 1.0 + 0.045 * sin(float(f) * 1.7 + float(r) * 2.1)
-			var base := _dark_base if dark else _light_base
-			var mat := _wood(Color(base.r * shade, base.g * shade, base.b * (shade * 0.98)), 0.58 if dark else 0.46)
 			var mi := MeshInstance3D.new()
-			var mesh := BoxMesh.new()
-			mesh.size = Vector3(0.98, 0.075 if dark else 0.068, 0.98)
-			mi.mesh = mesh
-			mi.material_override = mat
-			mi.position = Vector3(f - 3.5, 0.162 if dark else 0.168, 3.5 - r)
+			mi.mesh = tile
+			var dark := CheckersTypes.is_dark_fr(f, r)
+			var variant := rng.randi_range(0, MaterialLibrary.SQUARE_VARIANTS - 1)
+			mi.material_override = MaterialLibrary.dark_square(variant) if dark else MaterialLibrary.light_square(variant)
+			mi.position = Vector3(f - 3.5, LIFT + (0.0 if authored else TILE_H * 0.5), 3.5 - r)
+			mi.rotation.y = (PI * 0.5 if dark else 0.0) + (PI if rng.randf() < 0.5 else 0.0)
 			add_child(mi)
 			var body := StaticBody3D.new()
 			body.collision_layer = 1
@@ -206,82 +223,131 @@ func _build_squares() -> void:
 			body.set_meta("square", sq)
 			var col := CollisionShape3D.new()
 			var shape := BoxShape3D.new()
-			shape.size = Vector3(1.0, 0.16, 1.0)
+			shape.size = Vector3(1.0, 0.1, 1.0)
 			col.shape = shape
 			body.add_child(col)
-			body.position = Vector3(f - 3.5, 0.16, 3.5 - r)
+			body.position = Vector3(f - 3.5, TOP_Y - 0.05, 3.5 - r)
 			add_child(body)
 
 
+func _build_frame() -> void:
+	var mesh := _model("board_frame")
+	if mesh:
+		var mi := MeshInstance3D.new()
+		mi.mesh = mesh
+		mi.position.y = LIFT
+		for i in mesh.get_surface_count():
+			var role := PieceMeshBuilder.surface_role(mesh, i)
+			mi.set_surface_override_material(i, MaterialLibrary.inlay_mat if role == "trim" else MaterialLibrary.frame_mat)
+		add_child(mi)
+		return
+	var w := 0.6
+	var h := 0.22
+	for side in 4:
+		var mi := MeshInstance3D.new()
+		var box := BoxMesh.new()
+		box.size = Vector3(8.0 + w * 2.0, h, w) if side < 2 else Vector3(w, h, 8.0)
+		mi.mesh = box
+		mi.material_override = MaterialLibrary.frame_mat
+		var off := 4.0 + w * 0.5
+		mi.position = [Vector3(0, h * 0.5, off), Vector3(0, h * 0.5, -off), Vector3(off, h * 0.5, 0), Vector3(-off, h * 0.5, 0)][side]
+		add_child(mi)
+
+
+func _build_trays() -> void:
+	for side in [-1.0, 1.0]:
+		var tray := MeshInstance3D.new()
+		var box := BoxMesh.new()
+		box.size = Vector3(1.3, 0.03, 8.1)
+		tray.mesh = box
+		tray.material_override = MaterialLibrary.felt_mat
+		tray.position = Vector3(side * TRAY_X, 0.015, 0)
+		add_child(tray)
+		for edge in [-0.67, 0.67]:
+			var rail := MeshInstance3D.new()
+			var rb := BoxMesh.new()
+			rb.size = Vector3(0.04, 0.05, 8.1)
+			rail.mesh = rb
+			rail.material_override = MaterialLibrary.brass_mat
+			rail.position = Vector3(side * TRAY_X + edge, 0.025, 0)
+			add_child(rail)
+
+
 func _build_coords() -> void:
-	var font := ThemeDB.fallback_font
-	var display: FontFile = load("res://assets/fonts/InterDisplay-Medium.ttf")
-	if display:
-		font = display
+	var font := ThemeFactory.font("display_medium")
+	var y := LIFT + 0.105
 	for f in 8:
-		_label(CheckersTypes.FILE_NAMES[f], Vector3(f - 3.5, 0.24, 4.38), font)
-		_label(CheckersTypes.FILE_NAMES[f], Vector3(f - 3.5, 0.24, -4.38), font)
+		for z in [4.3, -4.3]:
+			_coords.append(_label(CheckersTypes.FILE_NAMES[f], Vector3(f - 3.5, y, z), font, 72, 0.0028))
 	for r in 8:
-		_label(str(r + 1), Vector3(-4.38, 0.24, 3.5 - r), font)
-		_label(str(r + 1), Vector3(4.38, 0.24, 3.5 - r), font)
+		for x in [-4.3, 4.3]:
+			_coords.append(_label(str(r + 1), Vector3(x, y, 3.5 - r), font, 72, 0.0028))
 
 
-func _label(text: String, pos: Vector3, font: Font) -> void:
+func _build_numbers() -> void:
+	var font := ThemeFactory.font("medium")
+	for sq in 64:
+		var n := CheckersTypes.square_number(sq)
+		if n < 0:
+			continue
+		var l := _label(str(n), Vector3.ZERO, font, 48, 0.0034)
+		l.set_meta("square", sq)
+		_numbers.append(l)
+	_place_numbers()
+
+
+## Numbers sit in the top-left corner of each dark square from the viewer's side.
+func _place_numbers() -> void:
+	var s := 1.0 if _white_bottom else -1.0
+	for l in _numbers:
+		var p := square_to_world(int(l.get_meta("square")))
+		l.position = Vector3(p.x - 0.33 * s, TOP_Y + 0.004, p.z - 0.33 * s)
+
+
+func _label(text: String, pos: Vector3, font: Font, size: int, px: float) -> Label3D:
 	var l := Label3D.new()
 	l.text = text
 	l.font = font
-	l.font_size = 30
-	l.modulate = Color(0.78, 0.86, 0.90, 0.78)
-	l.billboard = BaseMaterial3D.BILLBOARD_DISABLED
+	l.font_size = size
+	l.pixel_size = px
+	l.outline_size = 0
 	l.position = pos
 	l.rotation_degrees = Vector3(-90, 0, 0)
-	l.pixel_size = 0.011
+	l.shaded = false
+	l.double_sided = false
+	l.alpha_cut = Label3D.ALPHA_CUT_DISABLED
+	l.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(l)
+	return l
 
 
-func _build_highlights() -> void:
-	highlights.resize(64)
+func _build_marks() -> void:
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(1.0, 1.0)
 	for r in 8:
 		for f in 8:
-			var sq := CheckersTypes.sq(f, r)
-			var mi := MeshInstance3D.new()
-			var mesh := BoxMesh.new()
-			mesh.size = Vector3(0.96, 0.018, 0.96)
-			mi.mesh = mesh
-			mi.material_override = _last_mat
-			mi.position = Vector3(f - 3.5, 0.208, 3.5 - r)
-			mi.visible = false
-			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			add_child(mi)
-			highlights[sq] = mi
-
-
-func _build_dots() -> void:
-	dots.resize(64)
-	for r in 8:
-		for f in 8:
-			var sq := CheckersTypes.sq(f, r)
-			var mi := MeshInstance3D.new()
-			var mesh := CylinderMesh.new()
-			mesh.top_radius = 0.11
-			mesh.bottom_radius = 0.11
-			mesh.height = 0.03
-			mesh.radial_segments = 20
-			mi.mesh = mesh
-			mi.material_override = _dot_legal
-			mi.position = Vector3(f - 3.5, 0.222, 3.5 - r)
-			mi.visible = false
-			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			add_child(mi)
-			dots[sq] = mi
-
-
-func _build_hover() -> void:
+			var origin := Vector3(f - 3.5, TOP_Y, 3.5 - r)
+			var fill := MeshInstance3D.new()
+			fill.mesh = plane
+			fill.scale = Vector3(0.985, 1, 0.985)
+			fill.position = origin + Vector3(0, 0.003, 0)
+			fill.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			fill.visible = false
+			add_child(fill)
+			_fill.append(fill)
+			var marker := MeshInstance3D.new()
+			marker.mesh = plane
+			marker.position = origin + Vector3(0, 0.008, 0)
+			marker.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			marker.visible = false
+			add_child(marker)
+			_marker.append(marker)
 	_hover = MeshInstance3D.new()
-	var mesh := BoxMesh.new()
-	mesh.size = Vector3(0.98, 0.012, 0.98)
-	_hover.mesh = mesh
-	_hover.material_override = _hover_mat
-	_hover.visible = false
+	_hover.mesh = plane
+	_hover.material_override = MaterialLibrary.mark_hover
 	_hover.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_hover.visible = false
 	add_child(_hover)
+	_arrows = Node3D.new()
+	_arrows.name = "Arrows"
+	add_child(_arrows)
